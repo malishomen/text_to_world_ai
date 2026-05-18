@@ -1,0 +1,261 @@
+# ==============================================================================
+# DreamCraft (text_to_world_ai) — Hackathon AI orchestrator: text → 3D world
+# Static project map: structure, surfaces, env, deploy, workflows
+# ==============================================================================
+# This file = "what exists in the system" (verifiable from code).
+# For history/causes/decisions → see memory.md.
+# For behavior rules → see agent.md.
+#
+# Hard rule: kept in sync with code WITHOUT user reminders. See agent.md § 1.0.
+# Validate after edits: python -c "import yaml; yaml.safe_load(open('docs/PROJECT_MAP.yaml', encoding='utf-8'))"
+# ==============================================================================
+
+project:
+  name: DreamCraft
+  purpose: "Hackathon AI orchestrator: spoken/typed dream → playable 3D world in <90s"
+  language_audience: [en, ru]
+  default_lang: en
+  repository: github.com/malishomen/text_to_world_ai
+  working_branch: test
+  protected_branches: [main]
+  current_version: 0.1.0
+  status: development
+
+architecture:
+  topology: monorepo
+  runtime_processes:
+    - next_web:
+        type: Next.js 16 (App Router, React 19)
+        port: 3000
+        entry: web/app/page.tsx
+        notes: "Dev: `cd web && npm run dev`. Three.js + Rapier load client-side only (next/dynamic, ssr:false)."
+    - lm_studio_or_ollama:
+        type: External — local LLM API (Qwen3-coder)
+        port: 1234
+        entry: external
+        notes: "Optional. Endpoint configurable via QWEN_BASE_URL. Fallback config used if down."
+    - stable_diffusion_a1111:
+        type: External — Automatic1111 WebUI API
+        port: 7860
+        entry: external
+        notes: "Optional. SD_BASE_URL. Skipped via health check if down (Phase B)."
+    - trellis_gradio:
+        type: External — TRELLIS image-to-3D (HF Space OR local Gradio)
+        port: 7861
+        entry: external
+        notes: "TRELLIS_URL = HF Space id (e.g. JeffreyXiang/TRELLIS-image-large) OR http URL. HF probe before connect (Phase B)."
+    - python_orchestrator:
+        type: Python — agents/main.py (legacy v1 entry, currently unused by web flow)
+        port: n/a
+        entry: main.py
+        notes: "Predates the Next.js app. Not in MVP critical path."
+  dataflow:
+    - "User → /loading-dream → /api/analyze (Qwen) → gameConfig → /api/generate-3d (TRELLIS) ∥ /api/generate-assets (SD) → /play → DreamGame3D (R3F+Rapier)"
+    - "All artifacts persisted via localStorage between pages (no DB)."
+
+tech_stack:
+  backend:
+    language: TypeScript (Node 20+) + Python 3.11 (legacy orchestrator)
+    framework: Next.js 16 App Router (route handlers as API)
+    auth: none (single-user demo)
+    deps_file: web/package.json, requirements.txt
+  frontend:
+    type: SSR + client islands
+    framework: React 19 + Three.js (@react-three/fiber) + Rapier (@react-three/rapier) + drei + Framer Motion + Tailwind 4
+    deps_file: web/package.json
+  database:
+    engine: none (localStorage only)
+  infrastructure:
+    container: bare (no docker yet for web)
+    web_proxy: none
+    cloud_targets: [Vercel (planned)]
+
+# ==============================================================================
+# Directory structure
+# ==============================================================================
+directory_structure:
+  web/:
+    app/:
+      page.tsx: "Landing — dream input form, navigates to /loading-dream"
+      loading-dream/page.tsx: "Loading screen — orchestrates 3 API calls + hard timeout (Phase A) → /play"
+      play/page.tsx: "Game shell — sidebar + DreamGame3D canvas"
+      layout.tsx: "Root layout"
+      globals.css: "Tailwind 4 globals"
+      api/:
+        analyze/route.ts: "POST — Qwen → game config JSON"
+        generate-3d/route.ts: "POST — SD → reference image → TRELLIS → 3 GLBs"
+        generate-assets/route.ts: "POST — SD → 3 PNG sprites (2D fallback)"
+    components/:
+      DreamGame3D.tsx: "R3F Canvas: Player + Platforms + Enemies + GoalPortal + FollowCamera"
+    lib/:
+      fallback-config.ts: "buildFallback(dream) + GameConfig type (Phase A)"
+      with-timeout.ts: "withTimeout(promise, ms, label) helper (Phase B)"
+    public/:
+      generated/: "Runtime SD output — gitignored"
+      generated3d/: "Runtime TRELLIS output — gitignored"
+    .env: "LOCAL ONLY — never committed. See .env.local.example"
+    .env.local.example: "Documented env vars (Phase C)"
+  godot/:
+    main.tscn, project.godot: "Godot 4 project shell (WebGL export target, not in MVP demo path)"
+    scripts/: "GDScript: GameLoader, LevelGenerator, Player, AtmosphereController, Main"
+    shaders/: "Shader files (terrain, dream_object)"
+    assets/: "Static + runtime-written GLBs (runtime ones are gitignored)"
+  agents/:
+    analyzer.py, builder.py: "Python v1 orchestrator (legacy)"
+  main.py: "Python orchestrator entry (legacy)"
+  requirements.txt: "Python deps (legacy path)"
+  FIX_PLAN.md: "Audited 5-phase fix plan (A–E)"
+  README.md: "Original quick-start (now partially superseded by FIX_PLAN.md)"
+  docs/PROJECT_MAP.yaml: "This file"
+  memory.md: "Dynamic state + session log"
+  agent.md: "Behavior rules"
+
+# ==============================================================================
+# API surface (Next.js route handlers)
+# ==============================================================================
+api:
+  base_url: "http://localhost:3000"
+  public_paths: ["/*"]   # no auth in MVP
+  auth_header: none
+  endpoints:
+    generation:
+      - "POST /api/analyze — body: {dream:string} → game config JSON (or fallback)"
+      - "POST /api/generate-3d — body: {config} → {character_url,prop_url,portal_url, log, generated, total}"
+      - "POST /api/generate-assets — body: {config} → {background_url,character_url,platform_url, generated, message}"
+
+# ==============================================================================
+# Frontend pages
+# ==============================================================================
+frontend:
+  spa_router: Next.js App Router (file-system)
+  pages:
+    user:
+      - "app/page.tsx — landing / dream input"
+      - "app/loading-dream/page.tsx — generation orchestration with hard timeout"
+      - "app/play/page.tsx — game view"
+  cache_strategy: "localStorage keys: dreamText, gameConfig, gameAssets"
+
+# ==============================================================================
+# Environment variables
+# ==============================================================================
+env:
+  required_always: {}
+  optional:
+    QWEN_BASE_URL: "Local LLM endpoint (LM Studio/Ollama). Default http://localhost:1234"
+    QWEN_MODEL: "Model name. Default qwen3-coder-30b-a3b-instruct-mlx"
+    SD_BASE_URL: "Automatic1111 SD endpoint. Default http://127.0.0.1:7860"
+    TRELLIS_URL: "HF Space id or http URL. Default JeffreyXiang/TRELLIS-image-large"
+    HF_TOKEN: "Required when TRELLIS_URL is an HF Space"
+    NEXT_PUBLIC_MAX_GENERATION_MS: "Client hard-timeout for /loading-dream. Default 75000"
+    NEXT_PUBLIC_DEV_FAKE_AI: "If '1', loading-dream skips all APIs and uses fallback after 3s"
+    WRITE_GODOT_ASSETS: "If '1', generate-3d also writes GLBs into godot/assets/"
+  ops:
+    NODE_ENV: "development|production"
+
+# ==============================================================================
+# Deploy strategies
+# ==============================================================================
+deploy:
+  local_dev:
+    command: "cd web && npm install && npm run dev"
+    smoke_test: "curl -s http://localhost:3000 | head -5"
+  vercel_planned:
+    target: Vercel
+    deploy_method: "git push (planned)"
+    health_check: "GET /"
+    constraints: ["AI services (Qwen/SD/TRELLIS) run on user's machine, not Vercel"]
+
+deploy_rules:
+  branch_discipline:
+    - "Work only in `test`. Never push directly to `main`."
+    - "Merge `test` → `main` ONLY on user's explicit signal: literal phrase 'merge main now'."
+    - "Before `git push` → `git status` mandatory."
+  code_changes:
+    - "Never commit .env. .env.local.example is the documented template."
+    - "PROJECT_MAP.yaml + memory.md updated in same session as code changes (Convention 2)."
+  commit_format:
+    types: [feat, fix, docs, refactor, test, chore, perf]
+
+# ==============================================================================
+# Testing
+# ==============================================================================
+testing:
+  backend:
+    framework: none (manual)
+    location: n/a
+  frontend:
+    automation: none yet (Playwright planned)
+    manual_flow:
+      - "1. cd web && npm run dev"
+      - "2. Open http://localhost:3000, enter dream, click Craft My Game"
+      - "3. Verify /loading-dream reaches /play within ≤ NEXT_PUBLIC_MAX_GENERATION_MS"
+      - "4. Verify scene renders, WASD moves player, Space jumps, portal wins"
+  syntax_checks:
+    typescript: "cd web && npx tsc --noEmit"
+    eslint: "cd web && npm run lint"
+
+# ==============================================================================
+# Known issues
+# ==============================================================================
+known_issues:
+  loading_infinite_pre_phase_a:
+    where: web/app/loading-dream/page.tsx
+    symptom: "Page hangs forever if any of 3 APIs hangs (no client timeout)"
+    workaround: "Phase A adds hard timeout (MAX_GENERATION_MS) → always navigates"
+  gradio_no_timeout:
+    where: web/app/api/generate-3d/route.ts
+    symptom: "Client.connect / predict can take minutes on HF Space cold start"
+    workaround: "Phase B wraps every Gradio call in withTimeout + HF Space probe"
+  fallback_genre_wrong:
+    where: "all fallback configs (loading-dream, analyze, generate-assets)"
+    symptom: "Sidebar shows '2d platformer' for a 3D game"
+    workaround: "Phase A.2 unifies fallback with genre:'3d_platformer'"
+  lucide_react_version_suspect:
+    where: web/package.json
+    symptom: "lucide-react@^1.16.0 — unusually high version, may indicate wrong package"
+    workaround: "Works; do not touch before demo."
+
+# ==============================================================================
+# External services
+# ==============================================================================
+external_services:
+  optional:
+    qwen_via_lm_studio: "Local LLM for dream→config. http://localhost:1234/v1/chat/completions"
+    stable_diffusion_a1111: "Local SD WebUI for 2D + reference images. http://127.0.0.1:7860"
+    trellis_huggingface_space: "JeffreyXiang/TRELLIS-image-large — image→GLB"
+
+# ==============================================================================
+# Workflows
+# ==============================================================================
+workflows:
+  dream_to_world:
+    description: "Full end-to-end happy path"
+    steps:
+      - "1. User types/speaks dream on /"
+      - "2. dreamText saved to localStorage, navigate to /loading-dream"
+      - "3. POST /api/analyze (LLM → game config JSON)"
+      - "4. Parallel: POST /api/generate-3d (TRELLIS GLBs) + POST /api/generate-assets (SD PNGs)"
+      - "5. After ≤ MAX_GENERATION_MS or all-settled, navigate to /play"
+      - "6. /play reads gameConfig + gameAssets from localStorage, mounts DreamGame3D"
+      - "7. Player completes/fails, restart possible"
+  hard_timeout_fallback:
+    description: "What happens when AI services are slow or offline"
+    steps:
+      - "1. Analyze takes >25s OR returns 200 with fallback body → continue"
+      - "2. Gradio Client.connect >15s OR HF probe says SLEEPING → 3D skipped, partial:true"
+      - "3. SD ping fails → assets skipped, generated:false"
+      - "4. Client hard-timer (75s default) fires → navigate to /play with whatever gameConfig exists"
+      - "5. If no gameConfig at all → buildFallback(dream) → /play with default scene"
+
+# ==============================================================================
+# Quick verification commands
+# ==============================================================================
+quick_verification:
+  health:
+    - "curl -s http://localhost:3000 | head -5                      # web up?"
+    - "curl -s http://localhost:1234/v1/models                       # LM Studio up?"
+    - "curl -s http://127.0.0.1:7860/sdapi/v1/options | head -50     # SD up?"
+  api_smoke:
+    - "curl -s -X POST http://localhost:3000/api/analyze -H 'Content-Type: application/json' -d '{\"dream\":\"flying over crystal city\"}' | head"
+  recent_errors:
+    - "# In web/ dev console — watch terminal output of `npm run dev`"

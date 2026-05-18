@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import { RotateCcw, Download, Moon } from 'lucide-react';
@@ -24,7 +24,7 @@ export default function PlayPage() {
     const storedConfig = localStorage.getItem('gameConfig');
     const storedDream = localStorage.getItem('dreamText');
 
-    if (!storedConfig) { router.push('/'); return; }
+    if (!storedConfig) { router.replace('/'); return; }
 
     setConfig(JSON.parse(storedConfig));
     setDreamText(storedDream || '');
@@ -38,6 +38,11 @@ export default function PlayPage() {
     router.push('/');
   };
 
+  const palette = useMemo(() => {
+    const base = config?.color_palette ?? [];
+    return [...base, '#a855f7', '#7c3aed', '#4c1d95', '#1e1b4b'].slice(0, 4);
+  }, [config]);
+
   if (loading || !config) {
     return (
       <div className="min-h-screen bg-[#0a0015] flex items-center justify-center">
@@ -45,8 +50,6 @@ export default function PlayPage() {
       </div>
     );
   }
-
-  const palette = config.color_palette || ['#a855f7'];
 
   return (
     <main className="h-screen bg-[#0a0015] flex flex-col overflow-hidden">

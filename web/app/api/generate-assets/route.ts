@@ -28,11 +28,11 @@ async function generateImage(prompt: string, negative: string, filename: string)
         negative_prompt: negative,
         width: 512,
         height: 512,
-        steps: 20,
+        steps: 15,
         cfg_scale: 7,
         sampler_name: 'Euler a',
       }),
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.timeout(25000),
     });
 
     if (!res.ok) return null;
@@ -86,6 +86,19 @@ function buildPrompts(config: GameConfig) {
 export async function POST(req: NextRequest) {
   const { config } = await req.json();
   if (!config) return NextResponse.json({ error: 'No config' }, { status: 400 });
+
+  // Cheap probe so we don't waste 3×25 s timeouts when SD isn't even running.
+  const sdOk = await fetch(`${SD_BASE_URL}/sdapi/v1/options`,
+    { signal: AbortSignal.timeout(2000) }).then(r => r.ok).catch(() => false);
+  if (!sdOk) {
+    return NextResponse.json({
+      background_url: null,
+      character_url: null,
+      platform_url: null,
+      generated: false,
+      message: 'Stable Diffusion offline — using procedural visuals',
+    }, { status: 200 });
+  }
 
   const prompts = buildPrompts(config as GameConfig);
   const results: Record<string, string | null> = {};

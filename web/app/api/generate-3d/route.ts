@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { Client } from '@gradio/client';
 import * as fs from 'fs';
 import * as path from 'path';
+import { withTimeout } from '@/lib/with-timeout';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 // TRELLIS_URL = HuggingFace Space ID  →  "JeffreyXiang/TRELLIS-image-large"
@@ -54,32 +55,47 @@ async function trellisImageToGlb(imageBuffer: Buffer, filename: string): Promise
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const connectOpts: any = HF_TOKEN ? { hf_token: HF_TOKEN } : {};
-    const client = await Client.connect(TRELLIS_URL, connectOpts);
+    const client = await withTimeout(
+      Client.connect(TRELLIS_URL, connectOpts),
+      15000,
+      'gradio_connect',
+    );
 
     const imageBlob = new Blob([new Uint8Array(imageBuffer)], { type: 'image/png' });
 
     // Step A: Preprocess image (TRELLIS removes background, centers object)
-    const preprocessed = await client.predict('/preprocess_image', {
-      image: imageBlob,
-    });
+    const preprocessed = await withTimeout(
+      client.predict('/preprocess_image', { image: imageBlob }),
+      20000,
+      'preprocess_image',
+    );
     const processedImage = (preprocessed.data as unknown[])[0];
 
     // Step B: Image → 3D Gaussian Splatting + mesh
-    const result3d = await client.predict('/image_to_3d', {
-      image:                   processedImage,
-      seed:                    Math.floor(Math.random() * 65536),
-      randomize_seed:          true,
-      ss_guidance_strength:    7.5,   // Structure strength
-      ss_sampling_steps:       12,    // 12 = fast, 20 = quality
-      slat_guidance_strength:  3.0,   // Texture guidance
-      slat_sampling_steps:     12,
-    });
+    // (result not consumed — TRELLIS keeps session state for /extract_glb)
+    await withTimeout(
+      client.predict('/image_to_3d', {
+        image:                   processedImage,
+        seed:                    Math.floor(Math.random() * 65536),
+        randomize_seed:          true,
+        ss_guidance_strength:    7.5,   // Structure strength
+        ss_sampling_steps:       12,    // 12 = fast, 20 = quality
+        slat_guidance_strength:  3.0,   // Texture guidance
+        slat_sampling_steps:     12,
+      }),
+      IS_HF_SPACE ? 90000 : 60000,
+      'image_to_3d',
+    );
 
     // Step C: Extract GLB with texture baking
-    const glbResult = await client.predict('/extract_glb', {
-      mesh_simplify_ratio: 0.95,  // keep 95% of geometry
-      texture_size:        1024,  // 1024 for fast, 2048 for quality
-    });
+    const glbResult = await withTimeout(
+      client.predict('/extract_glb', {
+        mesh_simplify_ratio: 0.95,  // keep 95% of geometry
+        texture_size:        1024,  // 1024 for fast, 2048 for quality
+      }),
+      30000,
+      'extract_glb',
+    );
 
     // Download the GLB file from the Gradio temp URL
     const glbData = (glbResult.data as { url?: string; path?: string }[])[0];
@@ -163,6 +179,25 @@ export async function POST(req: NextRequest) {
     }, { status: 200 });
   }
 
+  // Cheap probe to detect sleeping/building HF Spaces before paying the Gradio
+  // handshake cost. Probe failures are non-fatal — we still attempt the call.
+  if (IS_HF_SPACE) {
+    try {
+      const probe = await fetch(`https://huggingface.co/api/spaces/${TRELLIS_URL}`,
+        { signal: AbortSignal.timeout(3000) });
+      if (probe.ok) {
+        const info = await probe.json();
+        if (info?.runtime?.stage && info.runtime.stage !== 'RUNNING') {
+          return NextResponse.json({
+            error: `HF Space stage: ${info.runtime.stage}`,
+            message: 'TRELLIS HF Space is not running (sleeping/building). Try again in ~30s.',
+            fallback: true,
+          }, { status: 200 });
+        }
+      }
+    } catch { /* probe failed — proceed anyway */ }
+  }
+
   const sdOk = await fetch(`${SD_URL}/sdapi/v1/options`, { signal: AbortSignal.timeout(3000) })
     .then(r => r.ok).catch(() => false);
 
@@ -182,8 +217,15 @@ export async function POST(req: NextRequest) {
   const results: Record<string, string | null> = {};
   const log: string[] = [`TRELLIS OK, SD ${sdOk ? 'OK' : 'offline'}`];
 
+  // Hard ceiling for the whole request — abandons remaining prompts if exceeded.
+  const deadline = Date.now() + 60_000;
+
   // Sequential generation (TRELLIS is stateful between steps A/B/C per session)
   for (const { sdPrompt, filename } of prompts) {
+    if (Date.now() > deadline) {
+      log.push(`deadline reached, skipping rest`);
+      break;
+    }
     try {
       // 1. Generate reference image
       let imgBuffer: Buffer | null = null;
