@@ -6,19 +6,10 @@ import { Physics, RigidBody, RapierRigidBody } from '@react-three/rapier';
 import { useRef, useEffect, useState, useMemo } from 'react';
 import * as THREE from 'three';
 
-export interface GameConfig {
-  mood: string;
-  style: string;
-  genre?: string;
-  color_palette: string[];
-  narrative: string;
-  goal: string;
-  music_prompt?: string;
-  main_character: { description: string; color: string };
-  background: { sky_color: string; ground_color: string };
-  platforms: number;
-  enemy_count: number;
-}
+// Single source of truth for the GameConfig type lives in `@/lib/fallback-config`.
+// Re-exported here for backwards-compatibility of existing imports.
+export type { GameConfig } from '@/lib/fallback-config';
+import type { GameConfig } from '@/lib/fallback-config';
 
 // ─── Keyboard hook ────────────────────────────────────────────────────────────
 function useKeys() {
@@ -58,20 +49,21 @@ interface PlayerProps {
   color: string;
   keys: React.RefObject<Record<string, boolean>>;
   goalPos: THREE.Vector3;
-  enemyRefs: React.RefObject<THREE.Vector3[]>;
+  enemyPositions: THREE.Vector3[];
+  endedRef: React.MutableRefObject<boolean>;
   onDead: () => void;
   onWin: () => void;
 }
 
-function Player({ bodyRef, color, keys, goalPos, enemyRefs, onDead, onWin }: PlayerProps) {
+function Player({ bodyRef, color, keys, goalPos, enemyPositions, endedRef, onDead, onWin }: PlayerProps) {
   const grounded = useRef(false);
   const canJump = useRef(true);
-  const ended = useRef(false);
+  const contacts = useRef(0);
   const meshRef = useRef<THREE.Mesh>(null);
   const lightRef = useRef<THREE.PointLight>(null);
 
   useFrame((_, delta) => {
-    if (!bodyRef.current || ended.current) return;
+    if (!bodyRef.current || endedRef.current) return;
 
     const vel = bodyRef.current.linvel();
     const pos = bodyRef.current.translation();
@@ -104,27 +96,25 @@ function Player({ bodyRef, color, keys, goalPos, enemyRefs, onDead, onWin }: Pla
     }
 
     // Death by falling
-    if (pos.y < -12 && !ended.current) {
-      ended.current = true;
+    if (pos.y < -12 && !endedRef.current) {
+      endedRef.current = true;
       onDead();
       return;
     }
 
     // Enemy collision (distance-based, avoids rapier event complexity)
     const playerVec = new THREE.Vector3(pos.x, pos.y, pos.z);
-    if (enemyRefs.current) {
-      for (const ep of enemyRefs.current) {
-        if (playerVec.distanceTo(ep) < 1.4) {
-          ended.current = true;
-          onDead();
-          return;
-        }
+    for (const ep of enemyPositions) {
+      if (playerVec.distanceTo(ep) < 1.4) {
+        endedRef.current = true;
+        onDead();
+        return;
       }
     }
 
     // Win
-    if (playerVec.distanceTo(goalPos) < 2.8 && !ended.current) {
-      ended.current = true;
+    if (playerVec.distanceTo(goalPos) < 2.8 && !endedRef.current) {
+      endedRef.current = true;
       onWin();
     }
   });
@@ -139,8 +129,14 @@ function Player({ bodyRef, color, keys, goalPos, enemyRefs, onDead, onWin }: Pla
       friction={2}
       linearDamping={0.8}
       position={[0, 4, 0]}
-      onCollisionEnter={() => { grounded.current = true; }}
-      onCollisionExit={() => { setTimeout(() => { grounded.current = false; }, 120); }}
+      onCollisionEnter={() => {
+        contacts.current++;
+        grounded.current = true;
+      }}
+      onCollisionExit={() => {
+        contacts.current = Math.max(0, contacts.current - 1);
+        if (contacts.current === 0) grounded.current = false;
+      }}
     >
       <mesh ref={meshRef} castShadow>
         <icosahedronGeometry args={[0.55, 2]} />
@@ -192,9 +188,9 @@ function Platform({ position, size, color, index }: {
 }
 
 // ─── Enemy ───────────────────────────────────────────────────────────────────
-function Enemy({ position, onUpdate }: {
+function Enemy({ position, posRef }: {
   position: [number, number, number];
-  onUpdate: (v: THREE.Vector3) => void;
+  posRef: THREE.Vector3;
 }) {
   const meshRef = useRef<THREE.Mesh>(null);
   const t = useRef(Math.random() * Math.PI * 2);
@@ -210,7 +206,7 @@ function Enemy({ position, onUpdate }: {
     );
     meshRef.current.rotation.x += delta * 1.2;
     meshRef.current.rotation.y += delta * 2;
-    onUpdate(meshRef.current.position.clone());
+    posRef.copy(meshRef.current.position);
   });
 
   return (
@@ -311,14 +307,15 @@ function generateLevel(config: GameConfig, palette: string[]) {
 }
 
 // ─── Main scene ──────────────────────────────────────────────────────────────
-function DreamScene({ config, onWin, onDead }: {
+function DreamScene({ config, restartToken, onWin, onDead }: {
   config: GameConfig;
+  restartToken: number;
   onWin: () => void;
   onDead: () => void;
 }) {
   const playerRef = useRef<RapierRigidBody>(null);
   const keys = useKeys();
-  const enemyPositions = useRef<THREE.Vector3[]>([]);
+  const endedRef = useRef(false);
 
   const palette = useMemo(
     () => (config.color_palette?.length ? config.color_palette : ['#a855f7', '#7c3aed', '#4c1d95', '#1e1b4b']),
@@ -336,14 +333,26 @@ function DreamScene({ config, onWin, onDead }: {
     const count = Math.min(config.enemy_count || 3, platforms.length - 1);
     return Array.from({ length: count }, (_, i) => {
       const p = platforms[Math.max(1, Math.round(1 + (i * (platforms.length - 2)) / Math.max(count - 1, 1)))];
-      return { id: i, pos: [p.pos[0], p.pos[1] + 1.5, p.pos[2]] as [number, number, number] };
+      const pos: [number, number, number] = [p.pos[0], p.pos[1] + 1.5, p.pos[2]];
+      return { id: i, pos, posRef: new THREE.Vector3(...pos) };
     });
   }, [config.enemy_count, platforms]);
 
-  // Initialize enemy positions array
+  // Stable array of enemy Vector3 refs for Player collision sampling.
+  // Each Vector3 instance is owned by the corresponding Enemy and mutated in place;
+  // the array identity only changes when `enemies` itself is recomputed.
+  const enemyPositions = useMemo(() => enemies.map(e => e.posRef), [enemies]);
+
+  // Restart: reset player transform + ended flag without remounting the Canvas.
+  // Skip on initial mount (restartToken === 0) — the body is still spawning.
   useEffect(() => {
-    enemyPositions.current = enemies.map(e => new THREE.Vector3(...e.pos));
-  }, [enemies]);
+    if (restartToken === 0) return;
+    endedRef.current = false;
+    playerRef.current?.setLinvel({ x: 0, y: 0, z: 0 }, true);
+    playerRef.current?.setAngvel({ x: 0, y: 0, z: 0 }, true);
+    playerRef.current?.setTranslation({ x: 0, y: 4, z: 0 }, true);
+    playerRef.current?.wakeUp();
+  }, [restartToken]);
 
   const skyHex = config.background?.sky_color || '#0a0015';
   const fogDensity = config.mood === 'nightmare' ? 0.03 : config.mood === 'cozy_dream' ? 0.006 : 0.015;
@@ -398,7 +407,8 @@ function DreamScene({ config, onWin, onDead }: {
           color={config.main_character?.color || palette[0]}
           keys={keys}
           goalPos={goalPos}
-          enemyRefs={enemyPositions}
+          enemyPositions={enemyPositions}
+          endedRef={endedRef}
           onDead={onDead}
           onWin={onWin}
         />
@@ -410,11 +420,11 @@ function DreamScene({ config, onWin, onDead }: {
       </Physics>
 
       {/* Enemies (kinematic, distance-based collision) */}
-      {enemies.map((e, i) => (
+      {enemies.map((e) => (
         <Enemy
           key={e.id}
           position={e.pos}
-          onUpdate={(v) => { enemyPositions.current[i] = v; }}
+          posRef={e.posRef}
         />
       ))}
 
@@ -430,19 +440,27 @@ function DreamScene({ config, onWin, onDead }: {
 // ─── Exported component ───────────────────────────────────────────────────────
 export default function DreamGame3D({ config }: { config: GameConfig }) {
   const [state, setState] = useState<'playing' | 'won' | 'dead'>('playing');
-  const [sceneKey, setSceneKey] = useState(0);
+  const [restartToken, setRestartToken] = useState(0);
 
-  const restart = () => { setState('playing'); setSceneKey(k => k + 1); };
+  const restart = () => {
+    setState('playing');
+    // The actual transform reset happens inside DreamScene via a restartToken effect.
+    setRestartToken(t => t + 1);
+  };
 
   return (
     <div className="relative w-full h-full" style={{ outline: 'none' }} tabIndex={0}>
       <Canvas
-        key={sceneKey}
         shadows
         camera={{ fov: 65, near: 0.1, far: 600, position: [0, 12, -18] }}
         gl={{ antialias: true, toneMapping: 3 /* ACESFilmic */ }}
       >
-        <DreamScene config={config} onWin={() => setState('won')} onDead={() => setState('dead')} />
+        <DreamScene
+          config={config}
+          restartToken={restartToken}
+          onWin={() => setState('won')}
+          onDead={() => setState('dead')}
+        />
       </Canvas>
 
       {/* Controls hint */}

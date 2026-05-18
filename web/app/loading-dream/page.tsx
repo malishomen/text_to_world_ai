@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { buildFallback, type GameConfig } from '@/lib/fallback-config';
 
 const STEPS = [
   { label: 'Reading your dream...', icon: '🌙', duration: 2000 },
@@ -14,105 +15,97 @@ const STEPS = [
   { label: 'Launching Godot engine...', icon: '⚡', duration: 2000 },
 ];
 
+const MAX_MS = Number(process.env.NEXT_PUBLIC_MAX_GENERATION_MS ?? 75000);
+
 export default function LoadingDream() {
   const [currentStep, setCurrentStep] = useState(0);
   const [progress, setProgress] = useState(0);
   const [narrative, setNarrative] = useState('');
-  const [error, setError] = useState('');
+  const [elapsedSec, setElapsedSec] = useState(0);
   const router = useRouter();
 
+  const started = useRef(false);
+  const navigated = useRef(false);
+
   useEffect(() => {
-    const dreamText = localStorage.getItem('dreamText');
-    if (!dreamText) {
-      router.push('/');
+    if (started.current) return;
+    started.current = true;
+
+    const dream = localStorage.getItem('dreamText');
+    if (!dream) {
+      router.replace('/');
       return;
     }
 
+    const ac = new AbortController();
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    let heartbeatId: ReturnType<typeof setInterval> | null = null;
+
+    const goPlay = (_reason: 'ok' | 'timeout' | 'error') => {
+      if (navigated.current) return;
+      navigated.current = true;
+      if (!localStorage.getItem('gameConfig')) {
+        localStorage.setItem('gameConfig', JSON.stringify(buildFallback(dream)));
+      }
+      router.replace('/play');
+    };
+
+    // Hard timeout — always navigate within MAX_MS.
+    timers.push(setTimeout(() => goPlay('timeout'), MAX_MS));
+
+    // Heartbeat — 1s ticks; UI surfaces it after 30s.
+    const startedAt = Date.now();
+    heartbeatId = setInterval(() => {
+      if (navigated.current) return;
+      setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+
+    // Step animation — every setTimeout tracked in `timers`.
     let stepIndex = 0;
     let elapsed = 0;
     const totalDuration = STEPS.reduce((sum, s) => sum + s.duration, 0);
 
     const tick = () => {
+      if (navigated.current) return;
       if (stepIndex >= STEPS.length) return;
       elapsed += STEPS[stepIndex].duration;
       setProgress(Math.round((elapsed / totalDuration) * 100));
       stepIndex++;
       setCurrentStep(stepIndex);
       if (stepIndex < STEPS.length) {
-        setTimeout(tick, STEPS[stepIndex].duration);
+        timers.push(setTimeout(tick, STEPS[stepIndex].duration));
       }
     };
+    timers.push(setTimeout(tick, STEPS[0].duration));
 
-    setTimeout(tick, STEPS[0].duration);
+    // Dev fake-AI shortcut — skip LLM/SD/TRELLIS entirely.
+    if (process.env.NEXT_PUBLIC_DEV_FAKE_AI === '1') {
+      timers.push(setTimeout(() => goPlay('ok'), 3000));
+      return () => {
+        ac.abort();
+        timers.forEach(clearTimeout);
+        if (heartbeatId !== null) clearInterval(heartbeatId);
+        started.current = false;
+      };
+    }
 
-    // Kick off AI generation
-    generateGame(dreamText);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const generateGame = async (dreamText: string) => {
-    try {
-      const analyzeRes = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dream: dreamText }),
+    generateGame(dream, ac.signal, setNarrative)
+      .then(() => goPlay('ok'))
+      .catch((err) => {
+        if (err?.name !== 'AbortError') console.error(err);
+        goPlay('error');
       });
 
-      if (!analyzeRes.ok) throw new Error('Dream analysis failed');
-      const gameConfig = await analyzeRes.json();
-      localStorage.setItem('gameConfig', JSON.stringify(gameConfig));
-      setNarrative(gameConfig.narrative || '');
-
-      // Generate 3D assets (Meshy.ai) + 2D fallback (SD) in parallel
-      const [assets3d, assets2d] = await Promise.allSettled([
-        fetch('/api/generate-3d', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ config: gameConfig }),
-        }).then(r => r.json()),
-        fetch('/api/generate-assets', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ config: gameConfig }),
-        }).then(r => r.json()),
-      ]);
-
-      const merged = {
-        ...(assets2d.status === 'fulfilled' ? assets2d.value : {}),
-        ...(assets3d.status === 'fulfilled' ? assets3d.value : {}),
-      };
-      localStorage.setItem('gameAssets', JSON.stringify(merged));
-
-      // Wait for loading animation to finish, then navigate
-      setTimeout(() => {
-        router.push('/play');
-      }, 1000);
-    } catch (err) {
-      console.error(err);
-      setError('Something went wrong crafting your dream. Retrying with defaults...');
-      // Use fallback and still navigate
-      const fallback = getFallbackConfig(localStorage.getItem('dreamText') || '');
-      localStorage.setItem('gameConfig', JSON.stringify(fallback));
-      setTimeout(() => router.push('/play'), 2000);
-    }
-  };
-
-  const getFallbackConfig = (dream: string) => ({
-    mood: 'surreal_calm',
-    genre: '2d_platformer',
-    style: 'surreal',
-    main_character: { description: 'A glowing dream wanderer', color: '#a855f7' },
-    background: { sky_color: '#0a0015', ground_color: '#1a0030' },
-    obstacles: ['floating_crystals', 'shadow_pillars'],
-    goal: 'Reach the light at the end of the dream',
-    music_prompt: 'dreamy ambient electronic, 90 bpm',
-    color_palette: ['#a8b2ff', '#ff9aee', '#7c3aed', '#1e1b4b'],
-    narrative: `In the dream: "${dream.slice(0, 120)}..."`,
-    platforms: 6,
-    enemy_count: 3,
-  });
+    return () => {
+      ac.abort();
+      timers.forEach(clearTimeout);
+      if (heartbeatId !== null) clearInterval(heartbeatId);
+      started.current = false;
+    };
+  }, [router]);
 
   const completedSteps = STEPS.slice(0, currentStep);
+  void completedSteps;
   const activeStep = STEPS[currentStep] || STEPS[STEPS.length - 1];
 
   return (
@@ -131,10 +124,6 @@ export default function LoadingDream() {
 
         {narrative && (
           <p className="text-purple-300/60 text-sm italic mb-6 px-4">&ldquo;{narrative}&rdquo;</p>
-        )}
-
-        {error && (
-          <p className="text-yellow-400/70 text-sm mb-4">{error}</p>
         )}
 
         {/* Progress bar */}
@@ -166,7 +155,56 @@ export default function LoadingDream() {
             </div>
           ))}
         </div>
+
+        {elapsedSec > 30 && (
+          <p className="text-purple-400/60 text-xs mt-2">
+            Still working… {elapsedSec}s / {Math.round(MAX_MS / 1000)}s
+          </p>
+        )}
       </div>
     </main>
   );
+}
+
+async function generateGame(
+  dream: string,
+  signal: AbortSignal,
+  setNarrative: (s: string) => void,
+): Promise<void> {
+  const analyzeRes = await fetch('/api/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dream }),
+    signal,
+  });
+
+  if (!analyzeRes.ok) throw new Error('Dream analysis failed');
+  const gameConfig = (await analyzeRes.json()) as GameConfig;
+
+  // Persist config BEFORE firing parallel asset jobs — so even if the
+  // hard timer trips while assets hang, /play has the good config.
+  localStorage.setItem('gameConfig', JSON.stringify(gameConfig));
+  if (gameConfig?.narrative) setNarrative(gameConfig.narrative);
+
+  // Generate 3D assets (TRELLIS) + 2D fallback (SD) in parallel.
+  const [assets3d, assets2d] = await Promise.allSettled([
+    fetch('/api/generate-3d', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: gameConfig }),
+      signal,
+    }).then((r) => r.json()),
+    fetch('/api/generate-assets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: gameConfig }),
+      signal,
+    }).then((r) => r.json()),
+  ]);
+
+  const merged = {
+    ...(assets2d.status === 'fulfilled' ? assets2d.value : {}),
+    ...(assets3d.status === 'fulfilled' ? assets3d.value : {}),
+  };
+  localStorage.setItem('gameAssets', JSON.stringify(merged));
 }
