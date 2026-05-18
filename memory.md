@@ -109,6 +109,25 @@ Single `buildFallback(dream)` in `web/lib/fallback-config.ts` eliminates drift.
 
 ## 4. Session log (append-only, newest at bottom)
 
+### 2026-05-19: merge test → main (Phase A–D + trinity landed)
+**Request:** User signal `merge main now` — explicit authorization to land
+all `test` work onto `main`.
+
+**Changes:**
+- `git checkout main && git merge --no-ff test` → merge commit `a66d7d9`.
+- Pushed `origin/main`.
+- Fast-forwarded `test` to match (both branches now at `a66d7d9`).
+
+**Current state:**
+- `main` and `test` aligned at `a66d7d9`.
+- Phase A–D + trinity now in production-equivalent branch.
+
+**Remaining / artifacts:**
+- Next user-driven session continues on `test` (branch discipline unchanged).
+- Phase E polish still deferred.
+
+---
+
 ### 2026-05-19: Phase A–D shipped (infinite-loading killed, server bounded, game restart in-place)
 **Request:** Execute FIX_PLAN.md Phases A–D via subagent decomposition, then
 full audit + final report.
@@ -209,8 +228,8 @@ project-memory-trinity skill.
 | Component | Status | Location |
 |---|---|---|
 | GitHub repo | ✅ live | https://github.com/malishomen/text_to_world_ai |
-| `main` branch | ✅ at 94f530a (initial import — pre Phase A–D) | origin/main |
-| `test` branch | ✅ at 1b5ab79 (Phase A–D applied) | origin/test |
+| `main` branch | ✅ at a66d7d9 (Phase A–D + trinity merged) | origin/main |
+| `test` branch | ✅ at a66d7d9 (aligned with main, HEAD here) | origin/test |
 | Next.js dev server | ⏸ not started in this session | `cd web && npm run dev` |
 | LM Studio (Qwen3-coder) | ❓ unknown — depends on user | localhost:1234 |
 | Stable Diffusion A1111 | ❓ unknown | 127.0.0.1:7860 |
