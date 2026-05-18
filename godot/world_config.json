@@ -1,0 +1,452 @@
+{
+  "fantasy": "тёмный средневековый лес с разрушенным замком, ночь, туман",
+  "mood": "dark_fantasy",
+  "weather": "fog",
+  "time": "night",
+  "fog_density": 0.04,
+  "color_palette": [
+    "#1a1a2e",
+    "#16213e",
+    "#0f3460",
+    "#533489"
+  ],
+  "lighting": {
+    "sun_energy": 0.1,
+    "sun_color": "#8b4513",
+    "ambient_energy": 0.1,
+    "ambient_color": "#0a0a1a"
+  },
+  "terrain": {
+    "height_scale": 12.0,
+    "roughness": 0.8,
+    "base_color": "#2d1b69",
+    "peak_color": "#1a0c3d"
+  },
+  "objects": [
+    {
+      "type": "castle",
+      "label": "Ruined Castle",
+      "trellis_prompt": "ruined medieval castle, isolated on white background, no shadows",
+      "sd_prompt": "ruined medieval stone castle with broken towers and overgrown vines, isolated white background",
+      "count": 1,
+      "is_landmark": true,
+      "scale": [
+        3.0,
+        3.0,
+        3.0
+      ],
+      "positions": [
+        [
+          -35.19,
+          0.0,
+          -59.1
+        ]
+      ],
+      "texture": "castle.png"
+    },
+    {
+      "type": "tree",
+      "label": "Ancient Oak Tree",
+      "trellis_prompt": "large dark oak tree, isolated on white background, no shadows",
+      "sd_prompt": "massive dark green oak tree with thick trunk and twisted branches, isolated white background",
+      "count": 25,
+      "is_landmark": false,
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "positions": [
+        [
+          -4.24,
+          0.0,
+          -8.27
+        ],
+        [
+          3.11,
+          0.0,
+          23.84
+        ],
+        [
+          23.45,
+          0.0,
+          -1.97
+        ],
+        [
+          -34.08,
+          0.0,
+          19.87
+        ],
+        [
+          -38.44,
+          0.0,
+          34.16
+        ],
+        [
+          -25.96,
+          0.0,
+          -43.11
+        ],
+        [
+          22.8,
+          0.0,
+          -7.43
+        ],
+        [
+          -20.99,
+          0.0,
+          -14.36
+        ],
+        [
+          -39.7,
+          0.0,
+          -14.26
+        ],
+        [
+          20.73,
+          0.0,
+          22.23
+        ],
+        [
+          5.77,
+          0.0,
+          22.99
+        ],
+        [
+          14.07,
+          0.0,
+          -7.41
+        ],
+        [
+          27.73,
+          0.0,
+          -28.64
+        ],
+        [
+          -18.83,
+          0.0,
+          17.1
+        ],
+        [
+          6.42,
+          0.0,
+          32.77
+        ],
+        [
+          -13.97,
+          0.0,
+          -10.14
+        ],
+        [
+          28.3,
+          0.0,
+          -41.57
+        ],
+        [
+          15.61,
+          0.0,
+          -48.78
+        ],
+        [
+          -18.42,
+          0.0,
+          -17.94
+        ],
+        [
+          -34.23,
+          0.0,
+          2.79
+        ],
+        [
+          19.57,
+          0.0,
+          3.03
+        ],
+        [
+          -5.02,
+          0.0,
+          34.64
+        ],
+        [
+          -17.02,
+          0.0,
+          8.63
+        ],
+        [
+          8.67,
+          0.0,
+          -24.84
+        ],
+        [
+          -8.91,
+          0.0,
+          13.11
+        ]
+      ],
+      "texture": "tree.png"
+    },
+    {
+      "type": "bush",
+      "label": "Thorny Bush",
+      "trellis_prompt": "dark thorn bush, isolated on white background, no shadows",
+      "sd_prompt": "dark green thorny bush with small berries, isolated white background",
+      "count": 20,
+      "is_landmark": false,
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "positions": [
+        [
+          -14.03,
+          0.0,
+          16.11
+        ],
+        [
+          11.2,
+          0.0,
+          -16.02
+        ],
+        [
+          47.02,
+          0.0,
+          23.25
+        ],
+        [
+          33.41,
+          0.0,
+          13.29
+        ],
+        [
+          -2.51,
+          0.0,
+          -13.52
+        ],
+        [
+          -8.57,
+          0.0,
+          1.76
+        ],
+        [
+          14.5,
+          0.0,
+          19.62
+        ],
+        [
+          -34.85,
+          0.0,
+          7.75
+        ],
+        [
+          38.94,
+          0.0,
+          -35.88
+        ],
+        [
+          -6.33,
+          0.0,
+          -28.98
+        ],
+        [
+          16.48,
+          0.0,
+          -13.63
+        ],
+        [
+          0.82,
+          0.0,
+          23.72
+        ],
+        [
+          1.52,
+          0.0,
+          10.04
+        ],
+        [
+          -1.36,
+          0.0,
+          10.81
+        ],
+        [
+          -4.23,
+          0.0,
+          32.42
+        ],
+        [
+          -19.78,
+          0.0,
+          16.99
+        ],
+        [
+          -22.8,
+          0.0,
+          -47.72
+        ],
+        [
+          20.56,
+          0.0,
+          -2.22
+        ],
+        [
+          38.42,
+          0.0,
+          27.42
+        ],
+        [
+          -43.01,
+          0.0,
+          -3.47
+        ]
+      ],
+      "texture": "bush.png"
+    },
+    {
+      "type": "rock",
+      "label": "Large Stone Rock",
+      "trellis_prompt": "large gray stone rock, isolated on white background, no shadows",
+      "sd_prompt": "large jagged gray stone rock with moss patches, isolated white background",
+      "count": 15,
+      "is_landmark": false,
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "positions": [
+        [
+          4.68,
+          0.0,
+          7.07
+        ],
+        [
+          -25.92,
+          0.0,
+          1.99
+        ],
+        [
+          12.01,
+          0.0,
+          -23.73
+        ],
+        [
+          28.28,
+          0.0,
+          -36.14
+        ],
+        [
+          8.17,
+          0.0,
+          29.92
+        ],
+        [
+          7.57,
+          0.0,
+          -31.15
+        ],
+        [
+          40.53,
+          0.0,
+          1.67
+        ],
+        [
+          -1.9,
+          0.0,
+          -25.54
+        ],
+        [
+          -16.95,
+          0.0,
+          -8.53
+        ],
+        [
+          -14.65,
+          0.0,
+          34.6
+        ],
+        [
+          -38.01,
+          0.0,
+          16.05
+        ],
+        [
+          18.28,
+          0.0,
+          3.43
+        ],
+        [
+          35.7,
+          0.0,
+          30.36
+        ],
+        [
+          12.72,
+          0.0,
+          -23.29
+        ],
+        [
+          -1.13,
+          0.0,
+          -24.99
+        ]
+      ],
+      "texture": "rock.png"
+    },
+    {
+      "type": "grave",
+      "label": "Ancient Grave",
+      "trellis_prompt": "old stone grave marker, isolated on white background, no shadows",
+      "sd_prompt": "weathered stone tombstone with ancient runes and moss, isolated white background",
+      "count": 8,
+      "is_landmark": false,
+      "scale": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "positions": [
+        [
+          -3.62,
+          0.0,
+          -7.28
+        ],
+        [
+          5.25,
+          0.0,
+          -11.53
+        ],
+        [
+          14.97,
+          0.0,
+          12.04
+        ],
+        [
+          -26.99,
+          0.0,
+          39.24
+        ],
+        [
+          -1.46,
+          0.0,
+          7.87
+        ],
+        [
+          -19.72,
+          0.0,
+          -50.95
+        ],
+        [
+          -25.72,
+          0.0,
+          18.65
+        ],
+        [
+          39.7,
+          0.0,
+          -21.36
+        ]
+      ],
+      "texture": "grave.png"
+    }
+  ]
+}
