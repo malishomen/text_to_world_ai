@@ -104,8 +104,6 @@ export default function LoadingDream() {
     };
   }, [router]);
 
-  const completedSteps = STEPS.slice(0, currentStep);
-  void completedSteps;
   const activeStep = STEPS[currentStep] || STEPS[STEPS.length - 1];
 
   return (

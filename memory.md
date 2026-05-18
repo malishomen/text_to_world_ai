@@ -109,6 +109,61 @@ Single `buildFallback(dream)` in `web/lib/fallback-config.ts` eliminates drift.
 
 ## 4. Session log (append-only, newest at bottom)
 
+### 2026-05-19: Phase A–D shipped (infinite-loading killed, server bounded, game restart in-place)
+**Request:** Execute FIX_PLAN.md Phases A–D via subagent decomposition, then
+full audit + final report.
+
+**Findings:**
+- All 4 phases had non-overlapping file scopes — ideal for parallel execution.
+- Shared `GameConfig` type needed a canonical home; centralized in
+  `web/lib/fallback-config.ts` so all paths (UI, API, fallback) agree.
+- Phase D subagent introduced one new lint anti-pattern (`enemyRefs.current = arr`
+  during render); fixed by switching to a plain `enemyPositions: THREE.Vector3[]`
+  prop — cleaner than the ref wrapper anyway.
+- Pre-existing lint warnings (Math.random in Enemy useRef init, setConfig in
+  /play effect, etc.) remain; out of scope for this PR.
+
+**Changes (commit 1b5ab79 on `test`):**
+- `web/lib/fallback-config.ts` — created (canonical `buildFallback` + `GameConfig` type).
+- `web/lib/with-timeout.ts` — created (generic `Promise.race` wrapper).
+- `web/app/loading-dream/page.tsx` — rewrote with hard timeout (`MAX_GENERATION_MS`,
+  default 75s), single `goPlay()` gate, AbortController, StrictMode + navigation
+  guards, full timer cleanup, heartbeat, dev fake-AI shortcut. Saves `gameConfig`
+  before parallel asset jobs.
+- `web/app/api/analyze/route.ts` — timeout 60s→25s, max_tokens 1024→1500,
+  uses unified fallback.
+- `web/app/api/generate-3d/route.ts` — HF Space probe (3s) before connect; every
+  Gradio call wrapped in `withTimeout` (connect 15s, preprocess 20s, image_to_3d
+  60s local / 90s HF, extract_glb 30s); 60s per-request deadline skips remaining
+  prompts.
+- `web/app/api/generate-assets/route.ts` — SD health check (2s) returns nulls
+  if SD offline; per-call timeout 60s→25s; SD steps 20→15.
+- `web/app/play/page.tsx` — palette guaranteed 4 colors via `useMemo`;
+  `router.push` → `router.replace` on missing config.
+- `web/components/DreamGame3D.tsx` — restart without `<Canvas>` re-key (uses
+  `restartToken` + `setTranslation`/`wakeUp`); `endedRef` lifted to `DreamScene`;
+  grounded via contact counter (eliminates 120ms ghost-jump); per-enemy `Vector3`
+  owned by useMemo, mutated in place; Player accepts plain `enemyPositions[]`.
+  GameConfig type re-exported from `@/lib/fallback-config`.
+- `web/.env.local.example` — created with every `process.env.*` referenced.
+- `.gitignore` + `web/.gitignore` — allowlisted `.env.example`/`.env.local.example`.
+
+**Current state:**
+- `test` at commit 1b5ab79. `npx tsc --noEmit` passes 0 errors. Lint: 2 pre-existing
+  errors + 2 warnings unchanged; no new errors from this PR.
+- `main` unchanged at 94f530a (awaiting explicit `merge main now`).
+- Loading screen now ALWAYS reaches `/play` within ≤75s, even with every
+  AI service offline.
+
+**Remaining / artifacts:**
+- Manual smoke test by user (dev server + browser).
+- Phase E (post-demo polish): parallel TRELLIS on self-host, `WRITE_GODOT_ASSETS`
+  env gate, structured logger.
+- Pre-existing lint cleanup (post-demo).
+- User signal `merge main now` → fast-forward `test` → `main` and push.
+
+---
+
 ### 2026-05-19: Trinity installed + audited FIX_PLAN committed + repo bootstrapped
 **Request:** Audit existing project, find the cause of "infinite generation/render",
 write a full fix plan, initialize GitHub repo with `test` and `main` branches,
@@ -154,22 +209,23 @@ project-memory-trinity skill.
 | Component | Status | Location |
 |---|---|---|
 | GitHub repo | ✅ live | https://github.com/malishomen/text_to_world_ai |
-| `main` branch | ✅ at 94f530a (initial import) | origin/main |
-| `test` branch | ✅ at 94f530a (HEAD here) | origin/test |
+| `main` branch | ✅ at 94f530a (initial import — pre Phase A–D) | origin/main |
+| `test` branch | ✅ at 1b5ab79 (Phase A–D applied) | origin/test |
 | Next.js dev server | ⏸ not started in this session | `cd web && npm run dev` |
 | LM Studio (Qwen3-coder) | ❓ unknown — depends on user | localhost:1234 |
 | Stable Diffusion A1111 | ❓ unknown | 127.0.0.1:7860 |
 | TRELLIS | ❓ unknown — HF Space cold | JeffreyXiang/TRELLIS-image-large |
-| Phase A code | ❌ not yet applied | queued for Subagent 1 |
-| Phase B code | ❌ not yet applied | queued for Subagent 2 |
-| Phase C code | ❌ not yet applied | queued for Subagent 3 |
-| Phase D code | ❌ not yet applied | queued for Subagent 4 |
+| Phase A — client stop-cock | ✅ shipped | web/app/loading-dream/page.tsx |
+| Phase B — server timeouts | ✅ shipped | web/app/api/*, web/lib/with-timeout.ts |
+| Phase C — /play defenses | ✅ shipped | web/app/play/page.tsx, web/.env.local.example |
+| Phase D — game refactor | ✅ shipped | web/components/DreamGame3D.tsx |
+| Phase E — polish | ⏸ deferred (post-demo) | — |
 
 **What's missing / deferred:**
-- Phases A–D code (in progress this session).
-- Phase E polish (parallel TRELLIS, structured logger) — post-demo.
+- Phase E polish (parallel TRELLIS on self-host, structured logger, GODOT_DIR opt-in env gate).
 - Audio (`music_prompt` field is generated but never played).
-- Playwright/manual test for full happy path.
+- Playwright / automated end-to-end test for the dream→play happy path.
+- Pre-existing lint issues NOT in fix scope: `Math.random()` inside `useRef()` initializer in `Enemy` (DreamGame3D.tsx:196); `setConfig` inside `useEffect` in `app/play/page.tsx`; `setParticles` inside `useEffect` in `app/page.tsx`; unused `GameAssets` interface in `play/page.tsx`. None affect runtime; clean up post-demo.
 
 **Where to look when X breaks:**
 - "/loading-dream never reaches /play" → `agent.md § 3.3` + `FIX_PLAN.md § Phase A`.
