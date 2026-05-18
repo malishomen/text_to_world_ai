@@ -1,0 +1,231 @@
+# memory.md — DreamCraft persistent memory
+
+> **Purpose:** persistent memory between AI-agent sessions. Holds what
+> **cannot be derived by reading code** — history of decisions, discovered
+> pitfalls, current operational snapshot.
+>
+> **Trinity partners:**
+> - [`docs/PROJECT_MAP.yaml`](docs/PROJECT_MAP.yaml) — static map (what exists)
+> - [`agent.md`](agent.md) — behavior rules (how to act)
+> - **`memory.md` (this file)** — dynamic state and history
+>
+> **Update rule:** after each meaningful session, append a new entry to
+> `## 4. Session log` at the bottom — WITHOUT rewriting old ones.
+
+---
+
+## 0. How to read
+
+| What you need | Section |
+|---|---|
+| Eternal truths about this project | § 1. Key invariants |
+| Current bugs and workarounds | § 2. Known issues & workarounds |
+| Why was it done this way | § 3. Decisions & rationale |
+| History of past sessions | § 4. Session log (append-only) |
+| What works/doesn't right now | § 5. Current operational state |
+| Frequently used commands | § 6. Quick reference |
+
+---
+
+## 1. Key invariants
+
+### 1.1. Branch discipline — `main` is sacred
+- Active development happens **only in `test`**.
+- Merge `test` → `main` requires user's **literal explicit signal**: the phrase `merge main now`.
+- No "I assume you wanted to merge". Ever.
+- Force-push to `main` is forbidden.
+
+### 1.2. `/loading-dream` MUST always navigate
+- Page must reach `/play` (or back to `/`) within `NEXT_PUBLIC_MAX_GENERATION_MS` (default 75s).
+- The single source of navigation is `goPlay(reason)` with a `navigated.current` guard — no double `router.push`.
+- If `gameConfig` already exists in localStorage when timeout fires → do NOT overwrite with fallback.
+- AbortError from cancelled fetch is expected — do not surface as user-facing error.
+- Reference: `web/app/loading-dream/page.tsx`, `FIX_PLAN.md § Phase A.1`.
+
+### 1.3. `genre` field is `3d_platformer` everywhere
+- The game IS 3D (Three.js + Rapier). Every fallback config must use `genre: '3d_platformer'`.
+- Pre-Phase-A code had `2d_platformer` in 3 fallback paths — caused wrong sidebar label.
+- Single source of truth: `web/lib/fallback-config.ts` (Phase A.2).
+
+### 1.4. Secrets never in git
+- `.env`, `.env.local`, anything matching `.env.*` (except `.env.*.example`) — gitignored.
+- HF_TOKEN, any future API keys — never logged, never committed.
+
+### 1.5. `PROJECT_MAP.yaml` syncs without reminders ⚠️
+- Any code/schema/deploy change affecting map content **must update PROJECT_MAP.yaml in the same session**.
+- User is not obliged to remind — agent's responsibility.
+- Triggers and self-check — in `agent.md § 1.0`.
+- If map drifts from code = bug requiring immediate correction.
+
+### 1.6. AGENTS.md warning about Next.js 16
+- `web/AGENTS.md` explicitly says: "This is NOT the Next.js you know. APIs, conventions, and file structure may differ. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code."
+- Do not assume Next 13/14 patterns work.
+- Do not touch `next.config.ts` casually.
+
+---
+
+## 2. Known issues & workarounds
+
+### 2.1. lucide-react@^1.16.0 — suspicious version
+**Symptom:** version 1.x is unusual (mainline is 0.46x).
+**Cause:** unknown — may be a fork or a typo in package.json.
+**Workaround:** works; icons render. **Do not upgrade before demo.**
+**Permanent fix:** post-demo, verify `npm ls lucide-react` and align with `lucide-react@latest` if safe.
+
+### 2.2. CRLF warnings on `git add` (Windows)
+**Symptom:** Git prints "LF will be replaced by CRLF" for every file.
+**Cause:** Default `core.autocrlf` on Windows.
+**Workaround:** Ignore — content unchanged; only line endings on checkout.
+**Permanent fix:** N/A. Optional `.gitattributes` to pin LF for source files.
+
+---
+
+## 3. Decisions & rationale
+
+### 3.1. Single repo, no submodules
+The `web/` folder had its own `.git` from `create-next-app` with one boilerplate
+commit. Removed to keep one history and avoid submodule confusion in a hackathon.
+**Alternatives:** keep as submodule (overhead not worth it for a 3-day project).
+**Reference:** see initial commit `94f530a`.
+
+### 3.2. Repo root = `web/DreamAI`, not `D:\projects\Hackatton`
+The Hackatton folder also contains `__MACOSX/` cruft and an unrelated `V1/`
+nesting. Initialized git at `V1/DreamAI` to match the repo name `text_to_world_ai`
+and keep history clean.
+**Alternatives:** init at Hackatton root (would include `__MACOSX/`, `V1/` shell).
+
+### 3.3. Hard client-side timeout (Phase A) over per-API timeouts only
+Even with B's server-side timeouts, an unhandled hang in any API layer would
+still block `Promise.allSettled`. The client owns its UX — it is responsible
+for never showing a frozen "Launching Godot engine…" screen. Hence dual defense.
+**Reference:** `FIX_PLAN.md § Phase A.1`.
+
+### 3.4. `genre` unification via shared lib (Phase A.2)
+The same fallback was duplicated in 3 places with diverging `genre` values.
+Single `buildFallback(dream)` in `web/lib/fallback-config.ts` eliminates drift.
+**Alternatives:** inline per-call (rejected — drift returns).
+
+---
+
+## 4. Session log (append-only, newest at bottom)
+
+### 2026-05-19: Trinity installed + audited FIX_PLAN committed + repo bootstrapped
+**Request:** Audit existing project, find the cause of "infinite generation/render",
+write a full fix plan, initialize GitHub repo with `test` and `main` branches,
+work in `test` only, merge `main` only on `merge main now` signal. Apply
+project-memory-trinity skill.
+
+**Findings:**
+- Root cause of infinite loading: `loading-dream/page.tsx` waits on `Promise.allSettled`
+  with no hard timeout; `@gradio/client` calls in `/api/generate-3d` have no timeout.
+- Stacked timeout gaps: client (none), generate-3d (none on Gradio), analyze (60s
+  but truncatable JSON), generate-assets (60s × 3 concurrent).
+- Genre mismatch: all 3 fallback paths use `'2d_platformer'` for a 3D game.
+- `web/.git` from `create-next-app` was nested inside the parent — removed.
+- `lucide-react@^1.16.0` looks suspicious but works.
+- `next.config.ts` is empty; `AGENTS.md` warns "this is NOT the Next.js you know".
+
+**Changes:**
+- `.gitignore` — created (covers .env, node_modules, .next, generated/, __MACOSX, etc).
+- `FIX_PLAN.md` — created with 5 phases (A–E), acceptance criteria, risk matrix.
+- `docs/PROJECT_MAP.yaml` — created (this trinity).
+- `memory.md` — created (this file).
+- `agent.md` — created (next).
+- Initial commit `94f530a` on `main`, pushed.
+- Branch `test` created from `main`, pushed. HEAD now on `test`.
+
+**Current state:**
+- Repo live at https://github.com/malishomen/text_to_world_ai
+- Both branches at `94f530a` (trinity adds will be the first divergence on `test`).
+- No code fix applied yet — Phase A/B/C/D queued.
+
+**Remaining / artifacts:**
+- Execute Phase A (frontend stop-cock) — Subagent 1.
+- Execute Phase B (server timeouts) — Subagent 2.
+- Execute Phase C (/play defenses + env example) — Subagent 3.
+- Execute Phase D (game restart + collisions) — Subagent 4.
+- After all 4 subagents complete: typecheck + lint + commit on `test` + audit report.
+
+---
+
+## 5. Current operational state
+
+**Live environments (as of 2026-05-19):**
+| Component | Status | Location |
+|---|---|---|
+| GitHub repo | ✅ live | https://github.com/malishomen/text_to_world_ai |
+| `main` branch | ✅ at 94f530a (initial import) | origin/main |
+| `test` branch | ✅ at 94f530a (HEAD here) | origin/test |
+| Next.js dev server | ⏸ not started in this session | `cd web && npm run dev` |
+| LM Studio (Qwen3-coder) | ❓ unknown — depends on user | localhost:1234 |
+| Stable Diffusion A1111 | ❓ unknown | 127.0.0.1:7860 |
+| TRELLIS | ❓ unknown — HF Space cold | JeffreyXiang/TRELLIS-image-large |
+| Phase A code | ❌ not yet applied | queued for Subagent 1 |
+| Phase B code | ❌ not yet applied | queued for Subagent 2 |
+| Phase C code | ❌ not yet applied | queued for Subagent 3 |
+| Phase D code | ❌ not yet applied | queued for Subagent 4 |
+
+**What's missing / deferred:**
+- Phases A–D code (in progress this session).
+- Phase E polish (parallel TRELLIS, structured logger) — post-demo.
+- Audio (`music_prompt` field is generated but never played).
+- Playwright/manual test for full happy path.
+
+**Where to look when X breaks:**
+- "/loading-dream never reaches /play" → `agent.md § 3.3` + `FIX_PLAN.md § Phase A`.
+- "Sidebar shows 2d platformer" → `web/lib/fallback-config.ts` (Phase A.2).
+- "Gradio Client hangs" → `web/lib/with-timeout.ts` + `agent.md § 3.4`.
+- "Scene crashes on restart" → `FIX_PLAN.md § Phase D`.
+
+---
+
+## 6. Quick reference
+
+### Start the stack / verify health
+```bash
+cd web && npm install                       # first time
+cd web && npm run dev                       # localhost:3000
+curl -s http://localhost:3000 | head -5     # is it up?
+```
+
+### Run typecheck / lint
+```bash
+cd web && npx tsc --noEmit
+cd web && npm run lint
+```
+
+### Dev shortcut: skip AI services
+```bash
+# Set in web/.env.local:
+NEXT_PUBLIC_DEV_FAKE_AI=1
+# /loading-dream will navigate to /play in 3s with fallback config
+```
+
+### Git workflow
+```bash
+git status
+git diff --name-only test                   # what changed vs test
+git add <specific files>                    # not -A blindly
+git commit -m "<type>: <desc>"
+git push origin test                        # NEVER push to main without 'merge main now'
+```
+
+### Merge test → main (only on `merge main now`)
+```bash
+git checkout main
+git merge --no-ff test -m "merge: test → main"
+git push origin main
+git checkout test
+```
+
+### Validate PROJECT_MAP.yaml
+```bash
+python -c "import yaml; yaml.safe_load(open('docs/PROJECT_MAP.yaml', encoding='utf-8')); print('OK')"
+```
+
+### External service smoke tests
+```bash
+curl -s http://localhost:1234/v1/models                              # LM Studio
+curl -s http://127.0.0.1:7860/sdapi/v1/options | head -20            # SD A1111
+curl -s https://huggingface.co/api/spaces/JeffreyXiang/TRELLIS-image-large | head -50  # HF Space
+```
