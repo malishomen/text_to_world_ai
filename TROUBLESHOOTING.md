@@ -222,6 +222,14 @@ fresh id.
 2. Hard-refresh.
 3. Confirm DevTools → Application → Storage shows no stale `generationId`.
 
+### Fire-and-forget assets do not dynamically appear in `/play`
+
+**Gap:** If `generate-assets` (e.g., Stable Diffusion) takes longer than the `/loading-dream` redirect timer, the assets will eventually arrive and be written to `localStorage` (via the background `fetch`), but the already-mounted `/play` page will **not** automatically show them.
+
+**Cause:** The `play/page.tsx` component reads `gameAssets` from `localStorage` once on mount. It does not set up a `storage` event listener to react to late-arriving updates.
+
+**Workaround:** For production demos with a real SD backend, manually refresh the `/play` page if you suspect textures have finished generating, or implement a `storage` event listener in `play/page.tsx` to dynamically push the new assets into the `DreamGame3D` props.
+
 ---
 
 ## Godot (experimental)
