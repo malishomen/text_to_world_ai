@@ -6,6 +6,11 @@ import { Physics, RigidBody, RapierRigidBody, BallCollider, CuboidCollider } fro
 import { useRef, useEffect, useState, useMemo, useCallback, Suspense, Component, ReactNode } from 'react';
 import * as THREE from 'three';
 import { OBJLoader } from 'three-stdlib';
+import { makeRng, hashString } from '@/lib/rng';
+import PostFX from './scene/PostFX';
+import { InstancedProps } from './scene/InstancedProps';
+import GroundMist from './scene/GroundMist';
+import DistantRidges from './scene/DistantRidges';
 
 // Single source of truth for the GameConfig type lives in `@/lib/fallback-config`.
 // Re-exported here for backwards-compatibility of existing imports.
@@ -524,20 +529,8 @@ function GoalPortal({ position, portalUrl }: {
   );
 }
 
-// ─── Deterministic RNG (LCG) — top-level, side-effect-free ─────────────────
-// `react-hooks/immutability` rejects closures that mutate captured vars
-// during render, so we keep the seed in an object owned by the caller.
-function makeRng(seed: number) {
-  const state = { s: seed | 0 };
-  return () => {
-    state.s = (state.s * 1664525 + 1013904223) & 0x7fffffff;
-    return state.s / 0x7fffffff;
-  };
-}
-
-function hashString(s: string, salt = 0): number {
-  return s.split('').reduce((acc, c) => acc + c.charCodeAt(0), salt);
-}
+// makeRng + hashString moved to web/lib/rng.ts so scene helpers can share
+// the same seeded RNG. Imported above.
 
 // ─── Mood preset ─────────────────────────────────────────────────────────────
 type PlayerShape = 'icosahedron' | 'tetrahedron' | 'octahedron' | 'dodecahedron' | 'sphere';
@@ -1170,6 +1163,49 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
   const p2 = useMemo(() => new THREE.Color(palette[2] || palette[0]), [palette]);
   const levelDepth = useMemo(() => Math.abs(last.pos[2]) + 40, [last]);
 
+  // Per-mood mist density (Tier 1 atmosphere). Cosmic/ethereal lean toward
+  // open void so we keep their density low; nightmare/dark_fantasy get the
+  // most fog-of-war feel.
+  const mistDensity = useMemo(() => {
+    switch (config.mood) {
+      case 'nightmare':    return 0.9;
+      case 'dark_fantasy': return 0.8;
+      case 'cozy_dream':   return 0.55;
+      case 'whimsical':    return 0.45;
+      case 'cyber_dream':  return 0.25;
+      case 'cosmic':
+      case 'ethereal':     return 0.0;
+      default:             return 0.4;
+    }
+  }, [config.mood]);
+
+  // Distant-ridges intensity (0..1) — height multiplier per mood.
+  const ridgeIntensity = useMemo(() => {
+    switch (config.mood) {
+      case 'nightmare':    return 0.95;
+      case 'dark_fantasy': return 0.85;
+      case 'cosmic':       return 0.7;
+      case 'cyber_dream':  return 0.55;
+      case 'cozy_dream':
+      case 'whimsical':    return 0.4;
+      case 'ethereal':     return 0.3;
+      default:             return 0.5;
+    }
+  }, [config.mood]);
+
+  // Exclusion regions on the XZ plane (platform footprints + buffer) so
+  // InstancedProps don't scatter under floating platforms or block the player.
+  const platformExclusions = useMemo(
+    () =>
+      platforms.map((p) => ({
+        x: p.pos[0],
+        z: p.pos[2],
+        // Half-width of the longer horizontal side + 1.5u clearance buffer.
+        r: Math.max(p.size[0], p.size[2]) / 2 + 1.5,
+      })),
+    [platforms],
+  );
+
   return (
     <>
       <SkyDome topColor={skyTop} bottomColor={skyBottom} />
@@ -1182,8 +1218,40 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
       <pointLight position={[-20, 15, -10]} color={p2} intensity={80} distance={60} />
       <pointLight position={[20, 5, 30]} color={p0} intensity={60} distance={50} />
 
-      {/* Environment */}
+      {/* Environment — order matters: opaque (far → near) BEFORE transparent. */}
       <Stars radius={120} depth={60} count={mp.starsCount} factor={5} fade speed={0.4} />
+
+      {/* Far-horizon silhouette ridges (opaque, heavily fog-dimmed). */}
+      <DistantRidges
+        color={mp.skyBottomColor}
+        levelDepth={levelDepth}
+        intensity={ridgeIntensity}
+      />
+
+      {/* Ground with mood-driven displacement (opaque). */}
+      {mp.groundColor && (
+        <DisplacedGround
+          color={mp.groundColor}
+          levelDepth={levelDepth}
+          terrain={mp.terrainType}
+        />
+      )}
+
+      {/* Per-mood instanced world props (mostly opaque; ethereal glass-spire
+          uses transparent material — render before the explicit-transparent
+          mist/particles below). */}
+      <InstancedProps
+        mood={config.mood}
+        levelDepth={levelDepth}
+        palette={palette}
+        seed={levelSeed}
+        exclusionPath={platformExclusions}
+      />
+
+      {/* Low-altitude mist billboards (transparent, depthWrite false). */}
+      <GroundMist color={palette[1] || skyBottom} levelDepth={levelDepth} density={mistDensity} />
+
+      {/* Atmospheric particles (transparent, instanced). */}
       {mp.particleType === 'sparkle' ? (
         <Sparkles
           count={mp.sparklesCount}
@@ -1195,13 +1263,6 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
         />
       ) : (
         <AtmosphericParticles kind={mp.particleType} palette={palette} levelDepth={levelDepth} />
-      )}
-      {mp.groundColor && (
-        <DisplacedGround
-          color={mp.groundColor}
-          levelDepth={levelDepth}
-          terrain={mp.terrainType}
-        />
       )}
 
       {/* Floating narrative */}
@@ -1355,6 +1416,8 @@ export default function DreamGame3D({ config, generationId, assets }: {
           onWin={() => setState('won')}
           onDead={() => setState('dead')}
         />
+        {/* Bloom postprocessing — intercepts the render after the scene tree. */}
+        <PostFX />
       </Canvas>
 
       {/* Mobile / touch hint (P2.12) */}
