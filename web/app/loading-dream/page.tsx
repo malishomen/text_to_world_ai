@@ -317,6 +317,7 @@ function runPipeline(deps: PipelineDeps): void {
     // user navigates to /play. Results land in localStorage and /play picks
     // them up via the DREAM_ASSETS_UPDATED_EVENT / storage event.
     setStatus({ kind: 'generating_assets' });
+    const charDesc = config.main_character?.description || 'dream wanderer';
     void Promise.allSettled([
       fetch('/api/generate-3d', {
         method: 'POST',
@@ -328,14 +329,26 @@ function runPipeline(deps: PipelineDeps): void {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config, generationId }),
       }).then((r) => r.json() as Promise<unknown>),
+      fetch('/api/generate-mesh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          description: charDesc,
+          mood: config.mood,
+          style: config.style,
+          generationId,
+        }),
+      }).then((r) => r.json() as Promise<unknown>),
     ])
       .then((results) => {
-        const [three, two] = results;
+        const [three, two, mesh] = results;
         const threeValue: unknown =
           three.status === 'fulfilled' ? three.value : null;
         const twoValue: unknown =
           two.status === 'fulfilled' ? two.value : null;
-        const merged: GameAssets = mergeAssetResponses(twoValue, threeValue, generationId);
+        const meshValue: unknown =
+          mesh.status === 'fulfilled' ? mesh.value : null;
+        const merged: GameAssets = mergeAssetResponses(twoValue, threeValue, generationId, meshValue);
         try {
           localStorage.setItem('gameAssets', JSON.stringify(merged));
         } catch {

@@ -30,10 +30,10 @@ architecture:
         entry: web/app/page.tsx
         notes: "Dev: `cd web && npm run dev`. Three.js + Rapier load client-side only (next/dynamic, ssr:false)."
     - lm_studio_or_ollama:
-        type: External — local LLM API (Qwen3-coder)
+        type: "External — local LLM API (multi-model: Qwen3-coder for /api/analyze + LLaMA-Mesh for /api/generate-mesh)"
         port: 1234
         entry: external
-        notes: "Optional. Endpoint configurable via QWEN_BASE_URL. Default LM Studio :1234; Ollama works at :11434. Fallback config used if down."
+        notes: "Optional. Endpoint configurable via QWEN_BASE_URL (shared by both endpoints). Default LM Studio :1234 (multi-model loading available in 0.4+; both Qwen3 ~6.7GB Q6_K and LLaMA-Mesh ~4.9GB Q4_K_M can be READY at once with enough RAM/VRAM). Ollama works at :11434. Fallback config used if down."
     - stable_diffusion_a1111:
         type: External — Automatic1111 WebUI API
         port: 7860
@@ -50,7 +50,7 @@ architecture:
         entry: main.py
         notes: "Predates the Next.js app. Not in MVP critical path. See LEGACY.md."
   dataflow:
-    - "User → /loading-dream → /api/analyze (Qwen) → gameConfig → /api/generate-3d (TRELLIS) ∥ /api/generate-assets (SD) → /play → DreamGame3D (R3F+Rapier)"
+    - "User → /loading-dream → /api/analyze (Qwen) → gameConfig → /api/generate-3d (TRELLIS) ∥ /api/generate-assets (SD) ∥ /api/generate-mesh (LLaMA-Mesh) → /play → DreamGame3D (R3F+Rapier). Player fallback chain: TRELLIS GLB → LLaMA-Mesh OBJ → procedural mood-shape primitive."
     - "All artifacts persisted via localStorage between pages (no DB)."
     - "Phase 3: each generation isolated under public/generated/<id>/ and public/generated3d/<id>/ via generationId."
 
@@ -69,7 +69,7 @@ tech_stack:
       - "@playwright/test 1.49 — e2e smoke suite (web/e2e/, headless Chromium)"
   frontend:
     type: SSR + client islands
-    framework: "React 19 + Three.js 0.184 + @react-three/fiber 9 + @react-three/rapier 2 + @react-three/drei 10 (useGLTF + useTexture for asset consumption with Suspense fallbacks) + Framer Motion 12 + Tailwind 4 + zod 4 + lucide-react"
+    framework: "React 19 + Three.js 0.184 + @react-three/fiber 9 + @react-three/rapier 2 + @react-three/drei 10 (useGLTF + useTexture for asset consumption with Suspense fallbacks) + @react-three/postprocessing 3 (Bloom via EffectComposer) + Framer Motion 12 + Tailwind 4 + zod 4 + lucide-react"
     deps_file: web/package.json
   database:
     engine: none (localStorage only)
@@ -84,7 +84,7 @@ tech_stack:
 directory_structure:
   web/:
     app/:
-      page.tsx: "Landing — dream input form, navigates to /loading-dream"
+      page.tsx: "Landing — dream input form. handleSubmit clears stale localStorage (gameConfig/gameAssets/generationId) before navigating to /loading-dream so each new dream gets a fresh level seed."
       loading-dream/page.tsx: "Loading screen — orchestrates analyze + fire-and-forget asset calls + hard timeout (Phase A) → /play"
       play/page.tsx: "Game shell — sidebar + DreamGame3D canvas; guards on gameConfig in localStorage"
       layout.tsx: "Root layout"
@@ -93,11 +93,27 @@ directory_structure:
         analyze/route.ts: "POST — LLM → normalized GameConfig (zod + parseGameConfig); ≤5000-char dream guard; fallbackOk on failure"
         generate-3d/route.ts: "POST — SD → reference PNG → TRELLIS → 3 GLBs under public/generated3d/<generationId>/; optional Godot mirror"
         generate-assets/route.ts: "POST — SD → 3 PNG sprites under public/generated/<generationId>/; ~2s SD health probe"
+        generate-mesh/route.ts: "POST — LLaMA-Mesh (LM Studio multi-model slot) → OBJ-text character mesh under public/generated3d/<generationId>/character.obj. Fully local, no API keys, ~50-60s per call."
     components/:
-      DreamGame3D.tsx: "R3F Canvas: Player + Platforms + Enemies + GoalPortal + FollowCamera; seeded RNG via makeRng (Phase 6)"
+      scene/:
+        PostFX.tsx: "Bloom postprocessing wrapper. @react-three/postprocessing EffectComposer + Bloom (intensity 0.6, threshold 0.55, mipmapBlur, radius 0.85). Placed as a Canvas child after DreamScene so it intercepts the scene render."
+        InstancedProps.tsx: "Per-mood instanced 'world props' scattered across the ground (~120-160 instances per dream). Eight mood variants: dead-spike-tree / giant-mushroom / antenna / asteroid / broken-column / glass-spire / candy-obelisk / floating-orb. Deterministic scatter via makeRng(hashString(generationId)); rejection-sampled against platformExclusions so props never spawn under the player's path. Zero per-frame allocations; asteroids rotate via cached Matrix4 + Quaternion refs."
+        GroundMist.tsx: "Low-altitude transparent mist. 10-60 drei Billboard puffs with a CanvasTexture soft-disc alpha mask (generated once, disposed on unmount). Per-instance state in one Float32Array (6 floats). Seeded by levelSeed so the layout is reproducible per dream; wrap-around z values drawn from a 32-entry pre-computed RNG pool to keep useFrame allocation-free. density=0 short-circuits the layer (cosmic/ethereal voids)."
+        DistantRidges.tsx: "Static PlaneGeometry 300×60 with 80×20 segments, per-vertex 2-octave value-noise displacement (peaks only on upper half, base flat). Faces +Z toward the camera at z=-levelDepth-80. flatShading + frustumCulled=false. Geometry disposed on unmount."
+      DreamGame3D.tsx: |
+        R3F Canvas: Player + Platforms + Enemies + GoalPortal + FollowCamera; seeded RNG via makeRng (Phase 6).
+        Tone mapping: THREE.ACESFilmicToneMapping with toneMappingExposure 1.2 (set via onCreated). DO NOT pass numeric toneMapping values — `3` is CineonToneMapping (deprecated, overexposes to white), `4` is ACESFilmic; always use the THREE constant.
+        World convention: right-handed; camera lives at player.z+16 looking toward -Z; level extends in -Z; W=-Z (forward), S=+Z, A=-X, D=+X. Reversing any one of these alone produces a mirrored render.
+        Player collider: explicit <BallCollider args={[0.55]}/> with RigidBody colliders={false}. Never let Rapier auto-derive from the visual mesh — GLB/OBJ characters (especially LLaMA-Mesh with 0..64 coord range) cause oversized or off-center auto-colliders that make the player stuck on platform edges.
+        Platform collider: explicit <CuboidCollider args={halfSize}/> with RigidBody colliders={false}. PlatformDecoration meshes (crystal/spire/orb/mushroom/neon) MUST live outside the RigidBody — when they were inside with colliders="cuboid" each decoration added its own auto-derived cuboid blocker on top of every platform (the neon torus produced an especially wide one), and players got stuck reaching the last-platform portal center.
+        Per-mood visual presets via moodPresetFor(): 8 presets keyed by LLM `mood` enum (surreal_calm | dark_fantasy | cozy_dream | nightmare | cyber_dream | ethereal | whimsical | cosmic) drive playerShape (icosahedron/tetrahedron/octahedron/dodecahedron/sphere), platformDecoration (crystal/spire/orb/mushroom/neon), enemyShape, enemyColor, skyTopColor, skyBottomColor, groundColor, plus fog/lights/particles.
+        Per-mood scene differentiators (beyond palette): MoodPreset.terrainType (none/hills/spikes/grid/cracks/rolling) feeds DisplacedGround; MoodPreset.particleType (sparkle/snow/sakura/neon_rain/embers/cosmic_dust) feeds AtmosphericParticles.
+        Components: SkyDome (custom back-side sphere shader, zenith→horizon gradient), DisplacedGround (PlaneGeometry with deterministic value-noise + per-mood per-vertex displacement function — replaces the earlier flat-fill ground; visual-only, no collider, death plane at y=-12 still ends the run), AtmosphericParticles (InstancedMesh, ~150-500 instances driven by useFrame: snow falls, sakura sways + rotates, neon_rain vertical streaks, embers rise, cosmic_dust slow drift; sparkle keeps the original drei Sparkles), PlatformDecoration (non-physics flair on each non-spawn platform, lives in a sibling group OUTSIDE the platform RigidBody).
+        Enter / NumpadEnter / Space restart the run from the win/dead overlays.
     lib/:
       fallback-config.ts: "buildFallback(dream) + GameConfig type (Phase A) — single source of truth for default configs"
       with-timeout.ts: "withTimeout(promise, ms, label) helper (Phase B)"
+      rng.ts: "Shared deterministic LCG RNG + cheap string hash. Used by DreamGame3D (level/terrain seed), InstancedProps (prop scatter), GroundMist (puff layout)."
       game-config-schema.ts: "Phase 2: zod schema + parseGameConfig / parseGameConfigExtended normalizer (lenient, never throws). normalizeGenre() is unconditional — always '3d_platformer'."
       generation-id.ts: "Phase 3: ID_PATTERN, isValidGenerationId, normalizeGenerationId, newGenerationId (UTC timestamp + 8 hex)"
       generated-paths.ts: "Phase 3: path-safe builders for public/generated/<id>/ and public/generated3d/<id>/ — buildAssetFsPath / buildAssetUrl / ensureAssetDir / isSafeFilename"
@@ -145,9 +161,10 @@ api:
   auth_header: none
   endpoints:
     generation:
-      - "POST /api/analyze — body: {dream:string} (trimmed, ≤5000 chars). Returns normalized GameConfig JSON via zod + parseGameConfigExtended. Response shape now includes optional extended fields (meshy_character_prompt, meshy_environment_prompt, weather, time_of_day, fog_density, terrain_height_scale, godot_environment_hints) when the LLM provides them. Always 200 — falls back to buildFallback(dream) on any LLM error. 400 on invalid body."
+      - "POST /api/analyze — body: {dream:string} (trimmed, ≤5000 chars). Returns normalized GameConfig JSON via zod + parseGameConfigExtended. SYSTEM_PROMPT is a creative-director brief with per-mood disambiguation, semantic palette roles (hero/mid/deep/anchor), and qualitative guidance for narrative (2-3 sentences / 30-60 words present tense / quote one specific image from the dream), main_character.description (6-12 words covering silhouette + material + posture — directly feeds /api/generate-mesh), music_prompt (genre + BPM + 2-3 instruments + emotion, 10-16 words), goal (5-10 word poetic command), platforms/enemy_count (qualitative thresholds). The user-turn message names the dreamer as protagonist and asks the LLM to extend (not summarize) specific imagery. LM Studio is called with response_format.json_schema (strict) so the model is FORCED to emit conforming JSON (LM Studio rejects OpenAI's `json_object`; only `json_schema` or `text` accepted). Qwen3 reasoning suppressed via chat_template_kwargs.enable_thinking:false + /no_think directive — otherwise <think> blocks consume the max_tokens budget and the truncated payload fails JSON.parse. LLM_TIMEOUT_MS env-configurable (default 60000). Always 200 — falls back to buildFallback(dream) on any LLM error. 400 on invalid body. Raw model content logged on parse failure for diagnostics."
       - "POST /api/generate-3d — body: {config:object, generationId?:string}. config is validated through parseGameConfigExtended (no deep-trust). Pipeline: SD reference PNG → TRELLIS (preprocess → image_to_3d → extract_glb). Writes to public/generated3d/<generationId>/{character,prop,portal}.glb. Response: {character_url, prop_url, portal_url, generated, total, log, generationId, wrote_godot, message}. Returns fallbackOk({fallback:true,...}) if HF_TOKEN missing, HF Space sleeping, or local TRELLIS unreachable."
       - "POST /api/generate-assets — body: {config:object, generationId?:string}. config is validated through parseGameConfig. Writes to public/generated/<generationId>/{background,character,platform}.png. Response: {background_url, character_url, platform_url, generated, generationId, message}. ~2s SD health probe; returns nulls if SD offline (never blocks /play)."
+      - "POST /api/generate-mesh — body: {description:string (≤300 chars), mood?:string (≤40), style?:string (≤40), generationId?:string}. mood + style are interpolated into the user-turn message so LLaMA-Mesh adjusts topology (angular for nightmare/cyber, round for cozy/whimsical, crystalline for ethereal/cosmic). Calls LM Studio multi-model server with model=MESH_MODEL (default 'llama-mesh', i.e. bartowski's GGUF of Zhengyi/LLaMA-Mesh, ~4.92 GB Q4_K_M, loaded alongside the analysis Qwen via LM Studio 0.4+). Strips markdown fences and <think>/preamble, keeps OBJ lines (v / vn / vt / f / g / o / #), validates that the payload has at least one vertex AND one face. Writes to public/generated3d/<generationId>/character.obj. Response: {character_obj_url, generationId, generated}. MESH_TIMEOUT_MS env (default 120000 — LLaMA-Mesh is token-by-token slow, ~50-60s per asset). Always 200 — fallbackOk({character_obj_url:null, fallback:true}) when LM Studio is down or LLaMA-Mesh is not loaded."
 
 # ==============================================================================
 # Frontend pages
@@ -168,12 +185,15 @@ env:
   required_always: {}
   optional:
     QWEN_BASE_URL: "Local LLM endpoint (OpenAI-compatible). Default http://localhost:1234 (LM Studio). Ollama also works at http://localhost:11434."
-    QWEN_MODEL: "Model name. Default qwen3-coder-30b-a3b-instruct-mlx"
+    QWEN_MODEL: "Model id reported by the local server's /v1/models list. Code default is qwen3-coder-30b-a3b-instruct-mlx (Apple-Silicon MLX build, will NOT run on Windows/Linux). On Windows the recommended replacement is qwen3-8b-gemini-3-pro-preview-distill (Q6_K GGUF, ~6.7 GB, JSON-schema friendly, ~15-20s response under LM Studio 0.4)."
     SD_BASE_URL: "Automatic1111 SD endpoint. Default http://127.0.0.1:7860"
     TRELLIS_URL: "HF Space id or http URL. Default JeffreyXiang/TRELLIS-image-large"
     HF_TOKEN: "Required when TRELLIS_URL is an HF Space. Get a free token at huggingface.co/settings/tokens."
-    NEXT_PUBLIC_MAX_GENERATION_MS: "Client hard-timeout for /loading-dream before forcing navigation. Default 75000"
-    NEXT_PUBLIC_DEV_FAKE_AI: "If '1', loading-dream skips all APIs and uses fallback after 3s (great for UI / scene work)"
+    LLM_TIMEOUT_MS: "Server-side fetch timeout inside /api/analyze for the LLM call. Default 60000 (was hardcoded 25000 — too tight for 8B models on CPU/modest GPU; previously caused silent fallbacks)."
+    MESH_MODEL: "Model id for /api/generate-mesh — must match what LM Studio exposes for LLaMA-Mesh. Default 'llama-mesh' (bartowski/LLaMA-Mesh-GGUF Q4_K_M)."
+    MESH_TIMEOUT_MS: "Server-side fetch timeout for /api/generate-mesh. Default 120000. LLaMA-Mesh streams OBJ token-by-token, ~50-60s per object on Q4_K_M."
+    NEXT_PUBLIC_MAX_GENERATION_MS: "Client hard-timeout on /loading-dream before forcing navigation to /play. Default 75000. Bump to 90000+ when real LLM is wired up so the analyze response can settle before the navigate timer fires."
+    NEXT_PUBLIC_DEV_FAKE_AI: "If '1', loading-dream skips all APIs and uses fallback after 3s (great for UI / scene work). Default '0' (real pipeline)."
     WRITE_GODOT_ASSETS: "If literal string '1', generate-3d also writes GLBs into ../../godot/assets/ and dream_config.json into godot/"
   ops:
     NODE_ENV: "development|production"
