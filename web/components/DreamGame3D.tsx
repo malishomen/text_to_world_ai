@@ -63,24 +63,35 @@ function FollowCamera({ target }: { target: React.RefObject<RapierRigidBody | nu
 }
 
 // ─── Character meshes (procedural ball OR loaded GLB) ────────────────────────
-function ProceduralBall({ color, meshRef, lightRef }: {
+function ProceduralBall({ color, shape, meshRef, lightRef }: {
   color: THREE.Color;
+  shape: PlayerShape;
   meshRef: React.RefObject<THREE.Mesh | null>;
   lightRef: React.RefObject<THREE.PointLight | null>;
 }) {
+  const geometry = (() => {
+    switch (shape) {
+      case 'tetrahedron': return <tetrahedronGeometry args={[0.7, 0]} />;
+      case 'octahedron': return <octahedronGeometry args={[0.65, 0]} />;
+      case 'dodecahedron': return <dodecahedronGeometry args={[0.6, 0]} />;
+      case 'sphere': return <sphereGeometry args={[0.55, 24, 16]} />;
+      case 'icosahedron':
+      default: return <icosahedronGeometry args={[0.55, 1]} />;
+    }
+  })();
   return (
     <>
       <mesh ref={meshRef} castShadow>
-        <icosahedronGeometry args={[0.55, 2]} />
+        {geometry}
         <meshStandardMaterial
           color={color}
           emissive={color}
-          emissiveIntensity={0.7}
+          emissiveIntensity={0.9}
           roughness={0.1}
           metalness={0.4}
         />
       </mesh>
-      <pointLight ref={lightRef} color={color} intensity={2.5} distance={6} />
+      <pointLight ref={lightRef} color={color} intensity={4} distance={8} />
     </>
   );
 }
@@ -101,6 +112,7 @@ function GltfCharacter({ url, meshRef }: {
 interface PlayerProps {
   bodyRef: React.RefObject<RapierRigidBody | null>;
   color: string;
+  shape: PlayerShape;
   characterUrl?: string | null;
   keys: React.RefObject<Record<string, boolean>>;
   goalPos: THREE.Vector3;
@@ -110,7 +122,7 @@ interface PlayerProps {
   onWin: () => void;
 }
 
-function Player({ bodyRef, color, characterUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin }: PlayerProps) {
+function Player({ bodyRef, color, shape, characterUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin }: PlayerProps) {
   const grounded = useRef(false);
   const canJump = useRef(true);
   const contacts = useRef(0);
@@ -177,7 +189,7 @@ function Player({ bodyRef, color, characterUrl, keys, goalPos, enemyPositions, e
   });
 
   const col = useMemo(() => new THREE.Color(color), [color]);
-  const procedural = <ProceduralBall color={col} meshRef={meshRef} lightRef={lightRef} />;
+  const procedural = <ProceduralBall color={col} shape={shape} meshRef={meshRef} lightRef={lightRef} />;
 
   return (
     <RigidBody
@@ -257,12 +269,14 @@ function PlainPlatformMaterial({ color, matRef }: {
   );
 }
 
-function Platform({ position, size, color, index, textureUrl }: {
+function Platform({ position, size, color, index, textureUrl, decoration, isSpawn }: {
   position: [number, number, number];
   size: [number, number, number];
   color: string;
   index: number;
   textureUrl?: string | null;
+  decoration: PlatformDecoration;
+  isSpawn: boolean;
 }) {
   const meshRef = useRef<THREE.Mesh>(null);
   const matRef = useRef<THREE.MeshStandardMaterial>(null);
@@ -289,15 +303,19 @@ function Platform({ position, size, color, index, textureUrl }: {
           </AssetBoundary>
         ) : plain}
       </mesh>
+      {/* Skip decoration on spawn platform — keep player area clean. */}
+      {!isSpawn && <PlatformDecoration kind={decoration} color={col} seed={index * 1.3} />}
     </RigidBody>
   );
 }
 
 // ─── Enemy ───────────────────────────────────────────────────────────────────
-function Enemy({ position, posRef, phaseSeed }: {
+function Enemy({ position, posRef, phaseSeed, shape, color }: {
   position: [number, number, number];
   posRef: THREE.Vector3;
   phaseSeed: number;
+  shape: EnemyShape;
+  color: string;
 }) {
   const meshRef = useRef<THREE.Mesh>(null);
   // Phase offset is supplied deterministically by the parent (DreamScene) so
@@ -319,14 +337,24 @@ function Enemy({ position, posRef, phaseSeed }: {
     posRef.copy(meshRef.current.position);
   });
 
+  const geom = (() => {
+    switch (shape) {
+      case 'tetrahedron': return <tetrahedronGeometry args={[0.65, 0]} />;
+      case 'cone': return <coneGeometry args={[0.5, 1.0, 6]} />;
+      case 'sphere': return <sphereGeometry args={[0.5, 16, 12]} />;
+      case 'octahedron':
+      default: return <octahedronGeometry args={[0.55, 0]} />;
+    }
+  })();
+
   return (
     <group>
       <mesh ref={meshRef} position={position} castShadow>
-        <octahedronGeometry args={[0.55, 0]} />
+        {geom}
         <meshStandardMaterial
-          color="#ff0044"
-          emissive="#ff0044"
-          emissiveIntensity={0.8}
+          color={color}
+          emissive={color}
+          emissiveIntensity={1.2}
           roughness={0.1}
           metalness={0.6}
         />
@@ -431,12 +459,23 @@ function hashString(s: string, salt = 0): number {
 }
 
 // ─── Mood preset ─────────────────────────────────────────────────────────────
+type PlayerShape = 'icosahedron' | 'tetrahedron' | 'octahedron' | 'dodecahedron' | 'sphere';
+type PlatformDecoration = 'crystal' | 'mushroom' | 'neon' | 'spire' | 'orb';
+type EnemyShape = 'octahedron' | 'tetrahedron' | 'cone' | 'sphere';
+
 interface MoodPreset {
   fogDensity: number;
   starsCount: number;
   sparklesCount: number;
   ambientIntensity: number;
   directionalIntensity: number;
+  playerShape: PlayerShape;
+  platformDecoration: PlatformDecoration;
+  enemyShape: EnemyShape;
+  enemyColor: string;
+  skyTopColor: string;
+  skyBottomColor: string;
+  groundColor: string | null;
 }
 
 function moodPresetFor(mood: string | undefined): MoodPreset {
@@ -447,6 +486,13 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       sparklesCount: 40,
       ambientIntensity: 1.0,
       directionalIntensity: 3.5,
+      playerShape: 'tetrahedron',
+      platformDecoration: 'spire',
+      enemyShape: 'tetrahedron',
+      enemyColor: '#ff2244',
+      skyTopColor: '#1a0008',
+      skyBottomColor: '#080010',
+      groundColor: '#15050a',
     };
   }
   if (mood === 'cozy_dream') {
@@ -456,15 +502,241 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       sparklesCount: 180,
       ambientIntensity: 2.0,
       directionalIntensity: 6.0,
+      playerShape: 'sphere',
+      platformDecoration: 'mushroom',
+      enemyShape: 'cone',
+      enemyColor: '#ff8855',
+      skyTopColor: '#f5b985',
+      skyBottomColor: '#7d4a8a',
+      groundColor: '#1a3a1a',
     };
   }
+  if (mood === 'cyber_dream') {
+    return {
+      fogDensity: 0.012,
+      starsCount: 1200,
+      sparklesCount: 80,
+      ambientIntensity: 1.2,
+      directionalIntensity: 4.0,
+      playerShape: 'octahedron',
+      platformDecoration: 'neon',
+      enemyShape: 'octahedron',
+      enemyColor: '#00ffaa',
+      skyTopColor: '#001a3a',
+      skyBottomColor: '#06b6d4',
+      groundColor: '#02041a',
+    };
+  }
+  if (mood === 'cosmic') {
+    return {
+      fogDensity: 0.008,
+      starsCount: 5000,
+      sparklesCount: 200,
+      ambientIntensity: 1.2,
+      directionalIntensity: 4.5,
+      playerShape: 'dodecahedron',
+      platformDecoration: 'crystal',
+      enemyShape: 'octahedron',
+      enemyColor: '#e879f9',
+      skyTopColor: '#0a0033',
+      skyBottomColor: '#020010',
+      groundColor: null,
+    };
+  }
+  if (mood === 'dark_fantasy') {
+    return {
+      fogDensity: 0.02,
+      starsCount: 2000,
+      sparklesCount: 60,
+      ambientIntensity: 1.0,
+      directionalIntensity: 4.0,
+      playerShape: 'icosahedron',
+      platformDecoration: 'spire',
+      enemyShape: 'tetrahedron',
+      enemyColor: '#ff3366',
+      skyTopColor: '#15082a',
+      skyBottomColor: '#080015',
+      groundColor: '#1a0a1f',
+    };
+  }
+  if (mood === 'ethereal') {
+    return {
+      fogDensity: 0.01,
+      starsCount: 1500,
+      sparklesCount: 250,
+      ambientIntensity: 2.2,
+      directionalIntensity: 5.5,
+      playerShape: 'octahedron',
+      platformDecoration: 'crystal',
+      enemyShape: 'sphere',
+      enemyColor: '#f0a8ff',
+      skyTopColor: '#d1baf0',
+      skyBottomColor: '#a085c5',
+      groundColor: null,
+    };
+  }
+  if (mood === 'whimsical') {
+    return {
+      fogDensity: 0.008,
+      starsCount: 1000,
+      sparklesCount: 200,
+      ambientIntensity: 2.0,
+      directionalIntensity: 5.5,
+      playerShape: 'sphere',
+      platformDecoration: 'mushroom',
+      enemyShape: 'sphere',
+      enemyColor: '#ffaa00',
+      skyTopColor: '#ffd5b0',
+      skyBottomColor: '#a07ad8',
+      groundColor: '#2a1a3a',
+    };
+  }
+  // surreal_calm and default
   return {
     fogDensity: 0.015,
     starsCount: 3000,
     sparklesCount: 120,
     ambientIntensity: 1.5,
     directionalIntensity: 5.0,
+    playerShape: 'icosahedron',
+    platformDecoration: 'crystal',
+    enemyShape: 'octahedron',
+    enemyColor: '#ff0044',
+    skyTopColor: '#2a0a55',
+    skyBottomColor: '#0a0015',
+    groundColor: '#1a0030',
   };
+}
+
+// ─── Gradient sky dome ───────────────────────────────────────────────────────
+const skyVert = `
+varying vec3 vWorldPosition;
+void main() {
+  vec4 wp = modelMatrix * vec4(position, 1.0);
+  vWorldPosition = wp.xyz;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}`;
+const skyFrag = `
+uniform vec3 topColor;
+uniform vec3 bottomColor;
+varying vec3 vWorldPosition;
+void main() {
+  float h = normalize(vWorldPosition).y;
+  float t = clamp((h + 0.15) * 1.2, 0.0, 1.0);
+  vec3 col = mix(bottomColor, topColor, t);
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+function SkyDome({ topColor, bottomColor }: { topColor: string; bottomColor: string }) {
+  const uniforms = useMemo(
+    () => ({
+      topColor: { value: new THREE.Color(topColor) },
+      bottomColor: { value: new THREE.Color(bottomColor) },
+    }),
+    [topColor, bottomColor],
+  );
+  return (
+    <mesh scale={[400, 400, 400]}>
+      <sphereGeometry args={[1, 32, 16]} />
+      <shaderMaterial
+        attach="material"
+        side={THREE.BackSide}
+        depthWrite={false}
+        uniforms={uniforms}
+        vertexShader={skyVert}
+        fragmentShader={skyFrag}
+      />
+    </mesh>
+  );
+}
+
+// ─── Ground plane (faded by fog at distance, anchors the scene) ─────────────
+function GroundPlane({ color, levelDepth }: { color: string; levelDepth: number }) {
+  // Plane extends behind player and along the level path. Sits at y=-4,
+  // below death plane (-12) is still safe — visual only, no collider.
+  return (
+    <mesh position={[0, -4, -levelDepth / 2]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+      <planeGeometry args={[200, levelDepth + 80]} />
+      <meshStandardMaterial color={color} roughness={0.9} metalness={0.0} />
+    </mesh>
+  );
+}
+
+// ─── Platform decoration (non-physics flair on top of each platform) ────────
+function PlatformDecoration({ kind, color, seed }: {
+  kind: PlatformDecoration;
+  color: THREE.Color;
+  seed: number;
+}) {
+  const ref = useRef<THREE.Mesh>(null);
+  const phase = useRef(seed);
+  useFrame((_, dt) => {
+    if (!ref.current) return;
+    phase.current += dt;
+    if (kind === 'crystal' || kind === 'spire' || kind === 'orb') {
+      ref.current.rotation.y += dt * 0.6;
+      ref.current.position.y = 1.2 + Math.sin(phase.current * 1.5) * 0.15;
+    }
+    if (kind === 'neon') {
+      ref.current.rotation.z = phase.current * 0.4;
+    }
+  });
+
+  const matCommon = {
+    color: '#ffffff',
+    emissive: color,
+    emissiveIntensity: 1.4,
+    roughness: 0.15,
+    metalness: 0.5,
+  };
+
+  if (kind === 'crystal') {
+    return (
+      <mesh ref={ref} position={[0, 1.2, 0]} castShadow>
+        <octahedronGeometry args={[0.4, 0]} />
+        <meshStandardMaterial {...matCommon} />
+      </mesh>
+    );
+  }
+  if (kind === 'spire') {
+    return (
+      <mesh ref={ref} position={[0, 1.2, 0]} castShadow>
+        <coneGeometry args={[0.25, 1.4, 6]} />
+        <meshStandardMaterial {...matCommon} emissiveIntensity={1.0} />
+      </mesh>
+    );
+  }
+  if (kind === 'orb') {
+    return (
+      <mesh ref={ref} position={[0, 1.2, 0]} castShadow>
+        <sphereGeometry args={[0.35, 16, 12]} />
+        <meshStandardMaterial {...matCommon} emissiveIntensity={2.0} />
+      </mesh>
+    );
+  }
+  if (kind === 'mushroom') {
+    return (
+      <group ref={ref as unknown as React.RefObject<THREE.Group>} position={[0, 0.6, 0]}>
+        <mesh position={[0, 0.25, 0]} castShadow>
+          <cylinderGeometry args={[0.08, 0.1, 0.5, 8]} />
+          <meshStandardMaterial color="#f5e6c8" roughness={0.9} />
+        </mesh>
+        <mesh position={[0, 0.6, 0]} castShadow>
+          <sphereGeometry args={[0.35, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2]} />
+          <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.6} roughness={0.6} />
+        </mesh>
+      </group>
+    );
+  }
+  if (kind === 'neon') {
+    return (
+      <mesh ref={ref} position={[0, 0.5, 0]} castShadow>
+        <torusGeometry args={[0.7, 0.05, 8, 32]} />
+        <meshStandardMaterial color="#ffffff" emissive={color} emissiveIntensity={3.5} roughness={0.0} metalness={0.0} />
+      </mesh>
+    );
+  }
+  return null;
 }
 
 // ─── Level generator ─────────────────────────────────────────────────────────
@@ -555,16 +827,20 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
     playerRef.current?.wakeUp();
   }, [restartToken]);
 
-  const skyHex = config.background?.sky_color || '#0a0015';
   const mp = useMemo(() => moodPresetFor(config.mood), [config.mood]);
+  // Sky uses mood preset's gradient; LLM's sky_color (if any) blends as bottomColor when richer.
+  const skyTop = mp.skyTopColor;
+  const skyBottom = config.background?.sky_color || mp.skyBottomColor;
+  const fogColorHex = skyBottom;
   const p0 = useMemo(() => new THREE.Color(palette[0]), [palette]);
   const p1 = useMemo(() => new THREE.Color(palette[1] || palette[0]), [palette]);
   const p2 = useMemo(() => new THREE.Color(palette[2] || palette[0]), [palette]);
+  const levelDepth = useMemo(() => Math.abs(last.pos[2]) + 40, [last]);
 
   return (
     <>
-      <color attach="background" args={[skyHex]} />
-      <fogExp2 attach="fog" args={[skyHex, mp.fogDensity]} />
+      <SkyDome topColor={skyTop} bottomColor={skyBottom} />
+      <fogExp2 attach="fog" args={[fogColorHex, mp.fogDensity]} />
 
       {/* Lighting */}
       <ambientLight intensity={mp.ambientIntensity} color={p1} />
@@ -583,6 +859,7 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
         speed={0.15}
         color={palette[0]}
       />
+      {mp.groundColor && <GroundPlane color={mp.groundColor} levelDepth={levelDepth} />}
 
       {/* Floating narrative */}
       <Float speed={0.8} floatIntensity={0.3} rotationIntensity={0.05}>
@@ -606,6 +883,7 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
         <Player
           bodyRef={playerRef}
           color={config.main_character?.color || palette[0]}
+          shape={mp.playerShape}
           characterUrl={assets?.character_3d ?? null}
           keys={keys}
           goalPos={goalPos}
@@ -624,6 +902,8 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
             color={p.color}
             index={i}
             textureUrl={assets?.platform_2d ?? null}
+            decoration={mp.platformDecoration}
+            isSpawn={i === 0}
           />
         ))}
       </Physics>
@@ -635,6 +915,8 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
           position={e.pos}
           posRef={e.posRef}
           phaseSeed={e.phaseSeed}
+          shape={mp.enemyShape}
+          color={mp.enemyColor}
         />
       ))}
 
