@@ -238,6 +238,27 @@ full audit + final report.
 
 ---
 
+### 2026-05-19: merge test → main (P0–P4 + e2e landed)
+**Request:** User signal `merge main now` — explicit authorization to land
+all `test` work onto `main`.
+
+**Changes:**
+- `git checkout main && git merge --no-ff test` → merge commit `ba1c9a2`.
+- Pushed `origin/main`.
+- Fast-forwarded `test` to match (both branches now at `ba1c9a2`).
+
+**Current state:**
+- `main` and `test` aligned at `ba1c9a2`.
+- P0–P4 + Playwright e2e + 213 unit tests now in production-equivalent branch.
+
+**Remaining / artifacts:**
+- P5 (production worker / queue / S3 / auth / observability) — separate
+  milestone per user spec; not started.
+- Continue daily work on `test`; main stays at `ba1c9a2` until next
+  literal `merge main now` signal.
+
+---
+
 ### 2026-05-19: P0–P4 quality plan shipped (real bugs closed, e2e green)
 **Request:** Execute the 12-phase quality plan (P0–P5) audit; fix every real
 bug found; ship green tests and green e2e; defer P5 to a later milestone.
@@ -371,8 +392,8 @@ project-memory-trinity skill.
 | Component | Status | Location |
 |---|---|---|
 | GitHub repo | ✅ live | https://github.com/malishomen/text_to_world_ai |
-| `main` branch | ✅ at a66d7d9 (Phase A–D + trinity merged) | origin/main |
-| `test` branch | ✅ at `(post-commit)` — P0–P4 shipped | origin/test |
+| `main` branch | ✅ at ba1c9a2 (P0–P4 + e2e merged) | origin/main |
+| `test` branch | ✅ at ba1c9a2 (aligned with main, HEAD here) | origin/test |
 | Next.js dev server | ⏸ not started in this session | `cd web && npm run dev` |
 | LM Studio (Qwen3-coder) | ❓ unknown — depends on user | localhost:1234 |
 | Stable Diffusion A1111 | ❓ unknown | 127.0.0.1:7860 |
