@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { buildFallback } from '@/lib/fallback-config';
-import { parseGameConfig } from '@/lib/game-config-schema';
+import { parseGameConfigExtended } from '@/lib/game-config-schema';
 import { badRequest, logApiError } from '@/lib/api-errors';
 
 const LM_BASE_URL = process.env.QWEN_BASE_URL || 'http://localhost:1234';
@@ -122,7 +122,7 @@ export async function POST(req: NextRequest) {
     const rawContent: string = data.choices?.[0]?.message?.content ?? '';
 
     const rawObj = parseJsonFromLLM(rawContent);
-    const normalized = parseGameConfig(rawObj, dream);
+    const normalized = parseGameConfigExtended(rawObj, dream);
     return NextResponse.json(normalized, { status: 200 });
   } catch (err) {
     logApiError('analyze', err);

@@ -14,6 +14,10 @@ import {
   isSafeFilename,
 } from '@/lib/generated-paths';
 import { badRequest, fallbackOk, logApiError } from '@/lib/api-errors';
+import {
+  parseGameConfigExtended,
+  type ExtendedGameConfig,
+} from '@/lib/game-config-schema';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 // TRELLIS_URL = HuggingFace Space ID  →  "JeffreyXiang/TRELLIS-image-large"
@@ -155,15 +159,7 @@ async function trellisImageToGlb(
 }
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────
-interface GameConfig {
-  mood: string;
-  style: string;
-  main_character?: { description?: string; color?: string };
-  meshy_character_prompt?: string;
-  meshy_environment_prompt?: string;
-}
-
-function buildSDPrompts(config: GameConfig) {
+function buildSDPrompts(config: ExtendedGameConfig) {
   const mood = config.mood || 'surreal_calm';
   const style = config.style || 'surreal';
   const charDesc = config.main_character?.description || 'dream wanderer';
@@ -214,7 +210,7 @@ export async function POST(req: NextRequest) {
   if (!b.config || typeof b.config !== 'object') {
     return badRequest('Field "config" is required', { field: 'config' });
   }
-  const config = b.config as GameConfig & Record<string, unknown>;
+  const config = parseGameConfigExtended(b.config, '');
 
   // 2. Resolve generationId.
   let generationId: string;
@@ -276,7 +272,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const prompts = buildSDPrompts(config as GameConfig);
+    const prompts = buildSDPrompts(config);
     const results: Record<string, string | null> = {};
     const log: string[] = [`TRELLIS OK, SD ${sdOk ? 'OK' : 'offline'}`];
     let wroteGodotAny = false;

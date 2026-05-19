@@ -125,12 +125,14 @@ export default function Home() {
             value={dreamText}
             onChange={(e) => setDreamText(e.target.value)}
             placeholder="I was walking through a neon forest where the trees were made of glass, and a giant moon hung so close I could touch it..."
+            aria-label="Describe your dream"
             className="w-full h-40 bg-transparent text-purple-100 placeholder-purple-400/40 text-base resize-none outline-none border border-purple-500/20 rounded-2xl p-4 focus:border-purple-400/50 transition-colors"
           />
 
           <div className="flex items-center gap-3 mt-4">
             <button
               onClick={isRecording ? stopRecording : startRecording}
+              aria-label={isRecording ? 'Stop voice recording' : 'Start voice recording'}
               className={`flex items-center gap-2 px-5 py-3 rounded-2xl font-medium transition-all duration-300 ${
                 isRecording
                   ? 'bg-red-500/20 border border-red-400/50 text-red-300 animate-pulse'

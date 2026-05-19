@@ -5,6 +5,11 @@ import { useRouter } from 'next/navigation';
 import { buildFallback, type GameConfig } from '@/lib/fallback-config';
 import { parseGameConfig } from '@/lib/game-config-schema';
 import { newGenerationId, isValidGenerationId } from '@/lib/generation-id';
+import {
+  type GameAssets,
+  DREAM_ASSETS_UPDATED_EVENT,
+  mergeAssetResponses,
+} from '@/lib/game-assets';
 
 // Visual progression skeleton — kept for animation continuity. The big
 // label/icon shown to the user is driven by the real `status` state machine
@@ -17,7 +22,7 @@ const STEPS = [
   { label: 'Generating 3D character & props...', icon: '🧙', duration: 5000 },
   { label: 'Setting up AAA lighting & VFX...', icon: '✨', duration: 3000 },
   { label: 'Composing the soundtrack...', icon: '🎵', duration: 2000 },
-  { label: 'Launching Godot engine...', icon: '⚡', duration: 2000 },
+  { label: 'Launching dream world...', icon: '⚡', duration: 2000 },
 ];
 
 const MAX_MS = Number(process.env.NEXT_PUBLIC_MAX_GENERATION_MS ?? 75000);
@@ -47,7 +52,7 @@ function viewForStatus(status: Status): StatusView {
     case 'generating_assets':
       return { label: 'Generating 3D character & props...', icon: '🧙' };
     case 'done':
-      return { label: 'Launching Godot engine...', icon: '⚡' };
+      return { label: 'Launching dream world...', icon: '⚡' };
     case 'fallback_used':
       return { label: 'Weaving a dream from imagination...', icon: '✨' };
   }
@@ -255,14 +260,15 @@ interface PipelineDeps {
 
 /**
  * Real pipeline:
- *  1. analyze (await — gates config)
+ *  1. analyze (await — gates config; uses AbortController via `signal`)
  *  2. parse defensively + save gameConfig
  *  3. fire-and-forget /api/generate-3d + /api/generate-assets in parallel
+ *     — INTENTIONALLY no signal: these MUST survive unmount/navigation
  *  4. navigate immediately to /play (don't block on assets)
  *
- * Assets that arrive after navigation write to localStorage; /play picks them
- * up on render or via a storage event. AbortController cancels them if the
- * user navigates away before they resolve.
+ * Assets that arrive after navigation write to localStorage and dispatch
+ * DREAM_ASSETS_UPDATED_EVENT on window; /play listens for both that event
+ * and the cross-tab `storage` event to refresh its asset state.
  */
 function runPipeline(deps: PipelineDeps): void {
   const { dream, generationId, signal, setStatus, setNarrative, goPlay, navigated } = deps;
@@ -306,39 +312,45 @@ function runPipeline(deps: PipelineDeps): void {
     }
     if (config.narrative) setNarrative(config.narrative);
 
-    // Fire-and-forget asset generation. AbortController in cleanup will
-    // cancel these if the user navigates away.
+    // Fire-and-forget asset generation. CRITICAL: these do NOT use the
+    // analyze AbortController — they must run to completion even after the
+    // user navigates to /play. Results land in localStorage and /play picks
+    // them up via the DREAM_ASSETS_UPDATED_EVENT / storage event.
     setStatus({ kind: 'generating_assets' });
     void Promise.allSettled([
       fetch('/api/generate-3d', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config, generationId }),
-        signal,
       }).then((r) => r.json() as Promise<unknown>),
       fetch('/api/generate-assets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ config, generationId }),
-        signal,
       }).then((r) => r.json() as Promise<unknown>),
-    ]).then((results) => {
-      const [three, two] = results;
-      const threeValue =
-        three.status === 'fulfilled' && three.value && typeof three.value === 'object'
-          ? (three.value as Record<string, unknown>)
-          : {};
-      const twoValue =
-        two.status === 'fulfilled' && two.value && typeof two.value === 'object'
-          ? (two.value as Record<string, unknown>)
-          : {};
-      const merged = { ...twoValue, ...threeValue };
-      try {
-        localStorage.setItem('gameAssets', JSON.stringify(merged));
-      } catch {
-        // ignore
-      }
-    });
+    ])
+      .then((results) => {
+        const [three, two] = results;
+        const threeValue: unknown =
+          three.status === 'fulfilled' ? three.value : null;
+        const twoValue: unknown =
+          two.status === 'fulfilled' ? two.value : null;
+        const merged: GameAssets = mergeAssetResponses(twoValue, threeValue, generationId);
+        try {
+          localStorage.setItem('gameAssets', JSON.stringify(merged));
+        } catch {
+          // ignore
+        }
+        try {
+          window.dispatchEvent(new CustomEvent(DREAM_ASSETS_UPDATED_EVENT));
+        } catch {
+          // ignore
+        }
+      })
+      .catch(() => {
+        // Defensive — never let asset failures crash navigation or surface
+        // as unhandled rejections.
+      });
 
     // Navigate immediately — don't wait for assets.
     if (!navigated.current) {

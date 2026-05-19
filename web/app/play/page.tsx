@@ -7,6 +7,12 @@ import { RotateCcw, Download, Moon, X } from 'lucide-react';
 import type { GameConfig } from '@/components/DreamGame3D';
 import { parseGameConfig } from '@/lib/game-config-schema';
 import { isValidGenerationId } from '@/lib/generation-id';
+import {
+  type GameAssets,
+  NO_ASSETS,
+  DREAM_ASSETS_UPDATED_EVENT,
+  isGameAssets,
+} from '@/lib/game-assets';
 
 // Three.js / Rapier must load client-side only — no SSR
 const DreamGame3D = dynamic(() => import('@/components/DreamGame3D'), { ssr: false });
@@ -15,6 +21,7 @@ export default function PlayPage() {
   const [config, setConfig] = useState<GameConfig | null>(null);
   const [dreamText, setDreamText] = useState('');
   const [generationId, setGenerationId] = useState<string | undefined>(undefined);
+  const [assets, setAssets] = useState<GameAssets>(NO_ASSETS);
   const [loading, setLoading] = useState(true);
   const [exportOpen, setExportOpen] = useState(false);
   const router = useRouter();
@@ -41,6 +48,20 @@ export default function PlayPage() {
     const rawGenId = localStorage.getItem('generationId');
     const validId = rawGenId && isValidGenerationId(rawGenId) ? rawGenId : undefined;
 
+    // Read any assets that already landed before /play mounted. Bad JSON or
+    // a failing type guard means we fall back to NO_ASSETS — procedural
+    // rendering kicks in inside DreamGame3D.
+    let initialAssets: GameAssets = NO_ASSETS;
+    try {
+      const stored = localStorage.getItem('gameAssets');
+      if (stored) {
+        const parsed: unknown = JSON.parse(stored);
+        if (isGameAssets(parsed)) initialAssets = parsed;
+      }
+    } catch {
+      // ignore — keep NO_ASSETS
+    }
+
     // localStorage is client-only — canonical Next.js App Router pattern is
     // to populate state from it inside an effect, then guard the render via
     // `loading`. setState-in-effect is unavoidable here.
@@ -48,9 +69,35 @@ export default function PlayPage() {
     setConfig(normalized);
     setDreamText(dreamTextStored);
     setGenerationId(validId);
+    setAssets(initialAssets);
     setLoading(false);
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [router]);
+
+  // Listen for late assets that resolve after /play has mounted.
+  // - DREAM_ASSETS_UPDATED_EVENT: fires in THIS tab when loading-dream finishes.
+  // - 'storage' event: fires in OTHER tabs when localStorage changes (multi-tab).
+  useEffect(() => {
+    const refresh = () => {
+      try {
+        const stored = localStorage.getItem('gameAssets');
+        if (!stored) return;
+        const parsed: unknown = JSON.parse(stored);
+        if (isGameAssets(parsed)) setAssets(parsed);
+      } catch {
+        // ignore
+      }
+    };
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'gameAssets') refresh();
+    };
+    window.addEventListener(DREAM_ASSETS_UPDATED_EVENT, refresh);
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(DREAM_ASSETS_UPDATED_EVENT, refresh);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
 
   // Escape-to-close for the Export modal.
   useEffect(() => {
@@ -98,11 +145,13 @@ export default function PlayPage() {
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <button onClick={handleNewDream}
+            aria-label="New Dream"
             className="flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl bg-purple-900/30 border border-purple-700/30 text-purple-300 hover:bg-purple-800/40 transition-all text-sm">
             <RotateCcw size={14} />
             <span className="hidden sm:inline">New Dream</span>
           </button>
           <button onClick={() => setExportOpen(true)}
+            aria-label="Export to Godot"
             className="flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl bg-violet-700/30 border border-violet-600/30 text-violet-300 hover:bg-violet-700/40 transition-all text-sm">
             <Download size={14} />
             <span className="hidden sm:inline">Export</span>
@@ -113,7 +162,7 @@ export default function PlayPage() {
       <div className="flex flex-col md:flex-row flex-1 overflow-hidden">
         {/* 3D Game */}
         <div className="flex-1 relative min-h-0">
-          <DreamGame3D config={config} generationId={generationId} />
+          <DreamGame3D config={config} generationId={generationId} assets={assets} />
         </div>
 
         {/* Sidebar — right rail on desktop, collapsible bottom panel on mobile */}

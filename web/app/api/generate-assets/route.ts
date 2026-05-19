@@ -13,16 +13,10 @@ import {
 } from '@/lib/generated-paths';
 
 import { badRequest, fallbackOk, logApiError } from '@/lib/api-errors';
+import { type GameConfig } from '@/lib/fallback-config';
+import { parseGameConfig } from '@/lib/game-config-schema';
 
 const SD_BASE_URL = process.env.SD_BASE_URL || 'http://127.0.0.1:7860';
-
-interface GameConfig {
-  style: string;
-  mood: string;
-  main_character: { description: string; color: string };
-  background: { sky_color: string; ground_color: string };
-  color_palette: string[];
-}
 
 type AssetFilename = 'background.png' | 'character.png' | 'platform.png';
 
@@ -164,7 +158,7 @@ export async function POST(req: NextRequest) {
   // ---- Phase 3: ensure per-id output dir exists ----------------------------
   ensureAssetDir({ cwd: process.cwd(), kind: '2d', generationId });
 
-  const config = bodyObj.config as GameConfig;
+  const config: GameConfig = parseGameConfig(bodyObj.config, '');
   const prompts = buildPrompts(config);
 
   // Generate all three assets concurrently (preserved).

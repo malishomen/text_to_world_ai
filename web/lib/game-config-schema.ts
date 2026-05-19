@@ -140,14 +140,9 @@ function normalizePalette(value: unknown, fallback: readonly string[]): string[]
   return filtered.length >= 1 ? filtered : [...fallback];
 }
 
-function normalizeGenre(value: unknown): string {
-  // Hard rule (agent.md §1.6): genre is always 3d_platformer.
-  // We accept any incoming `genre` string but reject the well-known wrong
-  // value `'2d_platformer'`. Anything else falls back to the default.
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (trimmed.length > 0 && trimmed !== '2d_platformer') return trimmed;
-  }
+function normalizeGenre(_value: unknown): string {
+  // Hard invariant (agent.md §1.6 / memory.md §1.3): the game is 3D.
+  // Every config, normalized or fallback, sets genre to '3d_platformer'.
   return DEFAULTS.genre;
 }
 
