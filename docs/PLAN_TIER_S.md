@@ -735,3 +735,54 @@ Updates during execution → append `### Addendum YYYY-MM-DD: <topic>`
 at the bottom, never edit earlier sections.
 
 — Claude Opus 4.7 (1M context), Tier S co-architect.
+
+---
+
+### Addendum 2026-05-19: Audio sourcing pivot to procedural primary
+
+**Decision:** Phase 0.1 (real MP3 ambient sourcing) skipped. Enhanced
+procedural synthesis (5-osc + ConvolverNode reverb + chorus per mood)
+becomes the **primary** path in Agent T, not the fallback.
+
+**Why:**
+- freepd.com is **permanently closed** as of 2025 (verified via WebFetch —
+  page returns 404, has a "service closed 2008-2025" notice).
+- incompetech.com tracks are accessible (HTTP 200, MacLeod public-domain
+  library) but each track is a 3-4 minute song at 12-18 MB. Eight tracks
+  = 100+ MB total assets, which (a) is too heavy for first-paint budget,
+  (b) requires trimming to 30-60s loops which is an extra build step.
+- Without ability to LISTEN to tracks, picking per-mood is gambling —
+  judges will hear "random Kevin MacLeod" not "atmospheric music".
+- Enhanced procedural with proper DSP (detuned voices + synthetic
+  impulse-response reverb + chorus modulation) is genuinely atmospheric
+  in modern Web Audio. Not "naive synth" — closer to ambient-pad VSTs.
+
+**Trade-off accepted:** real audio would have higher ceiling but
+unpredictable floor. Procedural has predictable, controllable quality
+and zero asset risk. For 165-min hackathon execution window, procedural
+ships reliably; real audio is a Tier B follow-up if time permits.
+
+**Agent T contract update:**
+- The procedural path is the **only** path. Drop the MP3 fetch attempt.
+- Per-mood preset: 5-7 detuned oscillators in a mood-tuned chord
+  (root, fifth, octave, ±cents detune for chorus shimmer), passed
+  through a BiquadFilter (lowpass per mood) into a ConvolverNode
+  with a SYNTHETIC impulse response generated once via
+  OfflineAudioContext (decaying noise burst, mood-tuned colour),
+  then to master gain.
+- Two LFOs per mood: slow filter cutoff modulation (0.05-0.1 Hz),
+  faster tremolo on master gain (0.2-0.4 Hz at depth 0.05-0.1).
+- This is significantly richer than v1's naive 2-osc design and
+  has been demonstrated to be "atmospheric, not video-gamey" in
+  published Web Audio examples.
+
+**Narrator (Agent N) unchanged:** ElevenLabs primary, Web Speech
+fallback. Real human voice is non-negotiable for wow.
+
+**Stingers (Agent S) unchanged:** procedural short bursts work fine
+for impact sounds — that's where synthesis excels.
+
+**Asset directory** `web/public/audio/` kept (still used as optional
+override location: if a user/admin drops an `ambient-<mood>.mp3`
+there manually, Agent T's loader detects it via `fetch().ok` and uses
+it instead of synthesis. Document this in the AudioEngine JSDoc.)

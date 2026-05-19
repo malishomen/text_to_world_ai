@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Mic, MicOff, Sparkles, Moon, Stars } from 'lucide-react';
+import { DEMO_PRESETS, type DemoPreset } from '@/lib/demo-presets';
 
 export default function Home() {
   const [dreamText, setDreamText] = useState('');
@@ -71,6 +72,16 @@ export default function Home() {
     router.push('/loading-dream');
   };
 
+  const handlePresetClick = (preset: DemoPreset) => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    localStorage.removeItem('gameAssets');
+    localStorage.setItem('dreamText', preset.dream);
+    localStorage.setItem('gameConfig', JSON.stringify(preset.config));
+    localStorage.setItem('generationId', preset.generationId);
+    router.push('/play'); // SKIP /loading-dream entirely
+  };
+
   const exampleDreams = [
     "I was flying over a crystal city at night, chased by shadows made of starlight...",
     "A forest where trees whispered secrets and mushrooms glowed like lanterns...",
@@ -116,6 +127,34 @@ export default function Home() {
             Tell your dream. Play it in 60 seconds.
           </p>
         </div>
+
+        {/* Instant-demo preset cards — skip the LLM, jump straight to /play */}
+        <section className="mb-6">
+          <div className="flex items-center justify-center gap-2 mb-3">
+            <Sparkles size={16} className="text-purple-400" />
+            <h2 className="text-purple-300/80 text-sm font-medium uppercase tracking-wider">Try a sample dream</h2>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {DEMO_PRESETS.map((preset) => (
+              <button
+                key={preset.id}
+                onClick={() => handlePresetClick(preset)}
+                disabled={isSubmitting}
+                aria-label={`Play sample dream: ${preset.label}`}
+                className="group relative text-left rounded-2xl border border-purple-500/20 p-4 transition-all hover:scale-[1.02] hover:border-purple-400/50 hover:shadow-lg hover:shadow-purple-900/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{
+                  backgroundImage: `linear-gradient(135deg, ${preset.config.color_palette[0]}1f, ${preset.config.color_palette[2] ?? preset.config.color_palette[0]}33)`,
+                }}
+              >
+                <span className="absolute top-2 right-3 text-[10px] uppercase tracking-wider text-purple-200/70 bg-purple-900/40 px-2 py-0.5 rounded-full border border-purple-500/30">
+                  {preset.badge.replace(/_/g, ' ')}
+                </span>
+                <h3 className="text-purple-100 font-semibold text-base mb-1 mt-1">{preset.label}</h3>
+                <p className="text-purple-200/60 text-xs italic leading-relaxed">&ldquo;{preset.teaser}&rdquo;</p>
+              </button>
+            ))}
+          </div>
+        </section>
 
         {/* Input card */}
         <div className="bg-white/5 backdrop-blur-xl border border-purple-500/20 rounded-3xl p-8 shadow-2xl shadow-purple-900/30">

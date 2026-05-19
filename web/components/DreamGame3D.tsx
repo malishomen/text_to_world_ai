@@ -1346,10 +1346,14 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
 }
 
 // ─── Exported component ───────────────────────────────────────────────────────
-export default function DreamGame3D({ config, generationId, assets }: {
+export default function DreamGame3D({ config, generationId, assets, onWinHook, onDeadHook }: {
   config: GameConfig;
   generationId?: string;
   assets?: GameAssets;
+  /** Optional side-effect fired before setState('won') — wire stinger SFX here. */
+  onWinHook?: () => void;
+  /** Optional side-effect fired before setState('dead') — wire stinger SFX here. */
+  onDeadHook?: () => void;
 }) {
   const [state, setState] = useState<'playing' | 'won' | 'dead'>('playing');
   const [restartToken, setRestartToken] = useState(0);
@@ -1421,8 +1425,8 @@ export default function DreamGame3D({ config, generationId, assets }: {
           generationId={generationId}
           assets={assets}
           restartToken={restartToken}
-          onWin={() => setState('won')}
-          onDead={() => setState('dead')}
+          onWin={() => { onWinHook?.(); setState('won'); }}
+          onDead={() => { onDeadHook?.(); setState('dead'); }}
         />
         {/* Bloom postprocessing — intercepts the render after the scene tree. */}
         <PostFX />
