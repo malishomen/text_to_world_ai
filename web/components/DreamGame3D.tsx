@@ -426,11 +426,11 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, characte
       {/* Character precedence:
             1. TRELLIS GLB                  (best — PBR-materials when alive)
             2. LLaMA-Mesh OBJ                (low-poly real geometry, always-on)
-            3. FLUX 2D billboard            (dream-specific art, no depth)
-            4. Procedural mood-shape         (final mood-tinted primitive)
-          Each step falls back via Suspense + AssetBoundary if the asset
-          fails to load. The point-light follows the chosen branch so the
-          player always glows. */}
+            3. Procedural mood-shape         (final mood-tinted primitive)
+          The FLUX 2D card is intentionally NOT in this chain — a flat
+          billboard reads as a paper cutout on the platform and ruins the
+          3D feel. FLUX 2D is still used for the panoramic sky backdrop
+          and the tileable platform texture, where it shines. */}
       {characterUrl ? (
         <AssetBoundary fallback={procedural}>
           <Suspense fallback={procedural}>
@@ -442,13 +442,6 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, characte
         <AssetBoundary fallback={procedural}>
           <Suspense fallback={procedural}>
             <ObjCharacter url={characterObjUrl} color={col} meshRef={gltfRef} />
-            <pointLight ref={lightRef} color={col} intensity={2.5} distance={6} />
-          </Suspense>
-        </AssetBoundary>
-      ) : character2dUrl ? (
-        <AssetBoundary fallback={procedural}>
-          <Suspense fallback={procedural}>
-            <BillboardCharacter url={character2dUrl} meshRef={gltfRef} />
             <pointLight ref={lightRef} color={col} intensity={2.5} distance={6} />
           </Suspense>
         </AssetBoundary>
