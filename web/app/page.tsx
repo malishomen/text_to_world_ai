@@ -85,12 +85,13 @@ export default function Home() {
     localStorage.setItem('gameConfig', JSON.stringify(preset.config));
     localStorage.setItem('generationId', preset.generationId);
 
-    // Fire-and-forget FLUX asset generation. /api/generate-assets is
-    // idempotent (cache short-circuit at first existing PNG triple) so
-    // every preset click after the first is a disk read. /play listens
-    // for DREAM_ASSETS_UPDATED_EVENT + storage event, so when assets
-    // land — even after navigation — the procedural cubes get replaced
-    // with FLUX-painted backdrop / character billboard / platform texture.
+    // Fire-and-forget FLUX (2D) + LLaMA-Mesh (3D OBJ) generation.
+    // Both endpoints are idempotent (per-generationId cache short-circuit)
+    // so subsequent clicks are pure disk reads. /play listens for
+    // DREAM_ASSETS_UPDATED_EVENT + storage events, so the procedural
+    // icosahedron gets swapped for a real OBJ mesh + FLUX-textured
+    // platforms + painterly backdrop as soon as the files land.
+    const charDesc = preset.config.main_character?.description || 'dream wanderer';
     void Promise.allSettled([
       fetch('/api/generate-assets', {
         method: 'POST',
@@ -100,14 +101,25 @@ export default function Home() {
           generationId: preset.generationId,
         }),
       }).then((r) => r.json() as Promise<unknown>),
+      fetch('/api/generate-mesh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          description: charDesc,
+          mood: preset.config.mood,
+          style: preset.config.style,
+          generationId: preset.generationId,
+        }),
+      }).then((r) => r.json() as Promise<unknown>),
     ])
-      .then(([two]) => {
+      .then(([two, mesh]) => {
         const twoValue: unknown = two.status === 'fulfilled' ? two.value : null;
+        const meshValue: unknown = mesh.status === 'fulfilled' ? mesh.value : null;
         const merged: GameAssets = mergeAssetResponses(
           twoValue,
           null,
           preset.generationId,
-          null,
+          meshValue,
         );
         try {
           localStorage.setItem('gameAssets', JSON.stringify(merged));

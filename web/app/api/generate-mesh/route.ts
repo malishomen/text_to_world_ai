@@ -93,6 +93,24 @@ export async function POST(req: NextRequest) {
     return badRequest('Unsafe filename');
   }
 
+  // Cache short-circuit: if character.obj already exists for this id,
+  // return its URL without hitting LM Studio. Critical for the preset
+  // flow where the same generationId is requested every demo click —
+  // without this, every click pays a 40-90 s LLM round-trip.
+  const existingFp = buildAssetFsPath({
+    cwd: process.cwd(),
+    kind: '3d',
+    generationId,
+    filename,
+  });
+  if (fs.existsSync(existingFp)) {
+    const cachedUrl = buildAssetUrl({ kind: '3d', generationId, filename });
+    return NextResponse.json(
+      { character_obj_url: cachedUrl, generationId, generated: 1, cached: true },
+      { status: 200 },
+    );
+  }
+
   try {
     const res = await fetch(`${LM_BASE_URL}/v1/chat/completions`, {
       method: 'POST',
