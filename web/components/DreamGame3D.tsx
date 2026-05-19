@@ -1221,9 +1221,11 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
       {/* Environment — order matters: opaque (far → near) BEFORE transparent. */}
       <Stars radius={120} depth={60} count={mp.starsCount} factor={5} fade speed={0.4} />
 
-      {/* Far-horizon silhouette ridges (opaque, heavily fog-dimmed). */}
+      {/* Far-horizon silhouette ridges (opaque, heavily fog-dimmed). Use
+          `skyBottom` not `mp.skyBottomColor` so the ridges follow the LLM's
+          background.sky_color override when present (audit HIGH-3 fix). */}
       <DistantRidges
-        color={mp.skyBottomColor}
+        color={skyBottom}
         levelDepth={levelDepth}
         intensity={ridgeIntensity}
       />
@@ -1248,8 +1250,14 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
         exclusionPath={platformExclusions}
       />
 
-      {/* Low-altitude mist billboards (transparent, depthWrite false). */}
-      <GroundMist color={palette[1] || skyBottom} levelDepth={levelDepth} density={mistDensity} />
+      {/* Low-altitude mist billboards (transparent, depthWrite false).
+          seed=levelSeed makes the puff layout reproducible per dream. */}
+      <GroundMist
+        color={palette[1] || skyBottom}
+        levelDepth={levelDepth}
+        density={mistDensity}
+        seed={levelSeed}
+      />
 
       {/* Atmospheric particles (transparent, instanced). */}
       {mp.particleType === 'sparkle' ? (

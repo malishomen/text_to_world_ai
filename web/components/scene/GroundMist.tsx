@@ -7,10 +7,11 @@
 // frame, sorts cleanly against the existing fogExp2, and reads as drifting
 // "slabs" of haze with no GPU pipeline surprises.
 
-import { useRef, useMemo, type JSX } from 'react';
+import { useRef, useMemo, useEffect, type JSX } from 'react';
 import { Billboard } from '@react-three/drei';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
+import { makeRng, hashString } from '@/lib/rng';
 
 export interface GroundMistProps {
   /** Hex color, tinted from mood (caller passes palette[1] or skyBottomColor). */
@@ -19,6 +20,12 @@ export interface GroundMistProps {
   levelDepth: number;
   /** 0..1, mood-driven multiplier on instance count. */
   density: number;
+  /**
+   * Seed string for deterministic puff layout. Use generationId so the same
+   * dream produces the same mist arrangement on reload. Defaults to a static
+   * string if omitted (mist will be identical across all dreams when not passed).
+   */
+  seed?: string;
 }
 
 // State layout per instance: [x, y, z, phase, scale, opacityMul]
@@ -60,33 +67,49 @@ function makeSoftDiscTexture(): THREE.Texture {
   return tex;
 }
 
-export default function GroundMist({ color, levelDepth, density }: GroundMistProps): JSX.Element {
+export default function GroundMist({ color, levelDepth, density, seed }: GroundMistProps): JSX.Element {
   // count = round(density * 50) clamped to [10, 60]. density=0 short-circuits.
   const count = density <= 0
     ? 0
     : Math.min(60, Math.max(10, Math.round(density * 50)));
 
-  // One-time soft mask shared by all puff materials.
+  // One-time soft mask shared by all puff materials. Disposed on unmount
+  // because the component owns the CanvasTexture (audit HIGH-2 fix).
   const alphaMap = useMemo<THREE.Texture>(() => makeSoftDiscTexture(), []);
+  useEffect(() => () => alphaMap.dispose(), [alphaMap]);
 
   // zHalf reaches from in-front of camera (+10) to far end of level path.
   const zFar = -levelDepth + 10;
   const zNear = 10;
 
   // Pre-allocated per-instance state — zero allocations during useFrame.
+  // Deterministic RNG seeded with `seed` so the same dream reloads to the
+  // same puff layout (audit HIGH-1 fix — was Math.random).
   const state = useMemo<Float32Array>(() => {
+    const rng = makeRng(hashString(seed ?? 'ground-mist-default', 31));
     const arr = new Float32Array(count * STATE_STRIDE);
     for (let i = 0; i < count; i++) {
       const b = i * STATE_STRIDE;
-      arr[b + 0] = (Math.random() - 0.5) * (X_HALF * 2);              // x
-      arr[b + 1] = Y_MIN + Math.random() * (Y_MAX - Y_MIN);           // y
-      arr[b + 2] = zFar + Math.random() * (zNear - zFar);             // z
-      arr[b + 3] = Math.random() * Math.PI * 2;                       // phase
-      arr[b + 4] = SCALE_MIN + Math.random() * (SCALE_MAX - SCALE_MIN); // scale
-      arr[b + 5] = 0.18 + Math.random() * 0.17;                       // opacity 0.18..0.35
+      arr[b + 0] = (rng() - 0.5) * (X_HALF * 2);                    // x
+      arr[b + 1] = Y_MIN + rng() * (Y_MAX - Y_MIN);                 // y
+      arr[b + 2] = zFar + rng() * (zNear - zFar);                   // z
+      arr[b + 3] = rng() * Math.PI * 2;                             // phase
+      arr[b + 4] = SCALE_MIN + rng() * (SCALE_MAX - SCALE_MIN);     // scale
+      arr[b + 5] = 0.18 + rng() * 0.17;                             // opacity 0.18..0.35
     }
     return arr;
-  }, [count, zFar, zNear]);
+  }, [count, zFar, zNear, seed]);
+
+  // RNG-backed wrap reseed — preserves determinism for the drift loop without
+  // calling Math.random inside useFrame. We pre-compute 32 sample z's keyed
+  // off seed so wrap-around resets cycle deterministically.
+  const wrapPool = useMemo<Float32Array>(() => {
+    const rng = makeRng(hashString(seed ?? 'ground-mist-default', 91));
+    const arr = new Float32Array(32);
+    for (let i = 0; i < 32; i++) arr[i] = zFar + rng() * (zNear - zFar);
+    return arr;
+  }, [zFar, zNear, seed]);
+  const wrapCursor = useRef(0);
 
   // Refs to each Billboard group — we mutate .position directly in useFrame.
   const groupRefs = useRef<Array<THREE.Group | null>>([]);
@@ -106,13 +129,16 @@ export default function GroundMist({ color, levelDepth, density }: GroundMistPro
       const sway = Math.sin(phase) * 0.6 + 1.0; // 0.4..1.6 of base speed
       state[b + 0] += DRIFT_SPEED * sway * delta;
       // Wrap horizontally — when off one side, jump to the opposite side and
-      // pick a new z so we don't get a visible "train" of identical puffs.
+      // pick a new z from the pre-computed RNG pool so we don't call
+      // Math.random inside useFrame (audit HIGH-1 fix).
       if (state[b + 0] > X_WRAP) {
         state[b + 0] = -X_WRAP;
-        state[b + 2] = zFar + Math.random() * (zNear - zFar);
+        state[b + 2] = wrapPool[wrapCursor.current];
+        wrapCursor.current = (wrapCursor.current + 1) & 31;
       } else if (state[b + 0] < -X_WRAP) {
         state[b + 0] = X_WRAP;
-        state[b + 2] = zFar + Math.random() * (zNear - zFar);
+        state[b + 2] = wrapPool[wrapCursor.current];
+        wrapCursor.current = (wrapCursor.current + 1) & 31;
       }
       g.position.set(state[b + 0], state[b + 1], state[b + 2]);
     }
