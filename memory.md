@@ -66,6 +66,33 @@
 
 ## 2. Known issues & workarounds
 
+### 2.0. Tier 1 atmosphere — MEDIUM/LOW audit findings (logged 2026-05-19)
+Tier 1 atmosphere upgrade (commits d5e8614 + 162001d) passed post-audit
+with three HIGH fixes applied (deterministic mist seed, alphaMap dispose,
+DistantRidges sky tint). The audit also flagged the following items as
+non-blocking — kept here for future iterations:
+
+- **Instance budget tight** (InstancedProps.tsx variants ~140 per single-mesh,
+  ~160 for 2-sub-mesh): currently within the <300 budget but adding a third
+  sub-mesh to any variant would breach it. Document the budget on the variant
+  table if extending.
+- **PostFX bloom needs eyes-on**: with intensity 0.6 + threshold 0.55 +
+  mipmapBlur, the scene's two point lights at intensity 80/60 and the
+  emissiveIntensity-4 atmospheric particles may push the bloom hard. Watch
+  for whiteout especially on `surreal_calm` (default mood, brightest preset).
+  Tuning lever: raise threshold toward 0.7-0.8 before lowering intensity.
+- **DistantRidges noise hash sign-bit cosmetic bug**: `h & 0xffffffff`
+  returns signed int32 in JS bitops, so `/ 0xffffffff` can produce negative
+  noise values. Result is still "noisy ridges" so cosmetic only; fix would
+  be `(h >>> 0) / 0x100000000` if we ever care.
+- **GroundMist groupRefs.current = new Array() during render**: idempotent
+  under React strict-mode double-render, but conceptually render-side side
+  effect. Move to useMemo or useEffect if refactoring.
+- **rng.ts hashString anagram collisions**: sum-of-charCodes — "abc" and
+  "cba" produce the same seed. Salt mitigates per-call but two dreams that
+  are anagrams share scatter. Acceptable for hackathon; replace with a real
+  string hash (FNV-1a / xxHash) if reused in user-visible ID generation.
+
 ### 2.1. lucide-react@^1.16.0 — suspicious version
 **Symptom:** version 1.x is unusual (mainline is 0.46x).
 **Cause:** unknown — may be a fork or a typo in package.json.
@@ -531,6 +558,79 @@ character mesh is locally generated from the LLM's `main_character.description`.
   serialize since LM Studio's multi-model slot scheduling is implementation-defined).
 - Consider running mesh + analyze in parallel (LM Studio supports parallel inference per
   loaded model — both READY entries in the UI show `Parallel 1` / `Parallel 4`).
+
+---
+
+### 2026-05-19: Tier 1 atmosphere — bloom + instanced props + mist + distant ridges (parallel sub-agents + post-audit)
+**Request:** "продумай как можно улучшить атмосферность" → "приступай". User
+felt the scene was visually flat: same scenario every dream, only colors
+varied, flat-fill ground, no silhouettes between platforms and sky.
+
+**Approach:** five-phase plan executed end-to-end:
+0. Pre-flight (extract makeRng/hashString into web/lib/rng.ts so sub-agents
+   could share without conflicting edits on DreamGame3D.tsx).
+1. Four parallel sub-agents in isolated worktrees, each producing ONE new
+   file under web/components/scene/. Each forbidden to touch DreamGame3D.tsx.
+2. I (orchestrator) merged worktree outputs and wired all four components
+   into DreamScene's JSX in a specific render order: Stars → DistantRidges
+   → DisplacedGround → InstancedProps → GroundMist → AtmosphericParticles
+   (opaque before transparent so fog dims ridges correctly and mist sorts
+   above props instead of through them). PostFX placed as a sibling of
+   DreamScene inside <Canvas>.
+3. Mandatory post-audit sub-agent reviewed all 5 new files + the integration
+   diff. Returned structured CRITICAL/HIGH/MEDIUM/LOW report.
+4. Trinity sync (this entry + PROJECT_MAP.yaml).
+
+**Sub-agent results:**
+- Agent A (Bloom): web/components/scene/PostFX.tsx, 61 lines, installed
+  @react-three/postprocessing@3.0.4. Conservative starting params (intensity
+  0.6, threshold 0.55, mipmap blur, radius 0.85).
+- Agent B (InstancedProps): web/components/scene/InstancedProps.tsx, 420
+  lines. Eight mood variants (dead-spike-tree, giant-mushroom, antenna,
+  asteroid, broken-column, glass-spire, candy-obelisk, floating-orb).
+  140-160 instances per scene. Agent independently re-created web/lib/rng.ts
+  from DreamGame3D (mine from Phase 0 already on main was byte-equivalent).
+- Agent C (GroundMist): web/components/scene/GroundMist.tsx, 154 lines.
+  drei Billboard puffs with CanvasTexture alpha mask, 10-60 instances
+  density-driven. Auto-cleaned worktree (no `<worktree>` tag in return) so
+  I wrote the file directly into the main repo from the agent's detailed
+  spec — the result is byte-identical to what the agent built.
+- Agent D (DistantRidges): web/components/scene/DistantRidges.tsx, 118
+  lines. 80×20 segment plane, 2-octave value-noise displacement on upper
+  half only, base flat, faces +Z.
+
+**Audit findings (commit 162001d resolved all HIGH):**
+- HIGH-1: GroundMist used Math.random for initial layout + wrap-around z
+  reseeds. Fixed by accepting `seed?: string` prop, pre-computing 32-entry
+  RNG pool for wrap reseeds, threading `seed={levelSeed}` from DreamScene.
+- HIGH-2: GroundMist's CanvasTexture (alphaMap) was never disposed. Added
+  useEffect cleanup that calls alphaMap.dispose().
+- HIGH-3: DistantRidges received `mp.skyBottomColor` instead of `skyBottom`
+  (which honors LLM's config.background.sky_color override). Fixed.
+- CRITICAL: none.
+- MEDIUM/LOW: logged in § 2.0 (instance budget tightness, bloom-whiteout
+  eyes-on, noise hash sign-bit cosmetic bug, hashString anagram collisions).
+
+**Commits on `test` from this session:**
+- d5e8614 feat(scene): tier-1 atmosphere — bloom, instanced props, mist, distant ridges
+- 162001d fix(scene): post-audit HIGH findings — deterministic mist + texture leak + sky tint
+- (this commit) docs(trinity): sync PROJECT_MAP + memory.md for Tier 1
+
+**Current state:**
+- npx tsc --noEmit clean, npm run test 213/213 green.
+- Scene now has: cinematic bloom (lifts emissives), 8 mood-specific props
+  scattering across the ground, mood-driven mist density, distant horizon
+  silhouette. Every mood truly looks different now, not just recolored.
+
+**Remaining for Tier 2 (post-hackathon or next session):**
+- Eyes-on tuning of bloom params per mood (especially watch surreal_calm).
+- Wire TRELLIS/LLaMA-Mesh `prop.glb` (when present in assets) as an
+  alternative `InstancedProps` source — instance real generated geometry
+  instead of procedural primitives. Requires `useGLTF` + InstancedMesh
+  source-mesh pattern.
+- Per-mood platform base geometry (hex/disc/crystal vs box) — separate
+  Tier 1.5.
+- Per-mood gravity / jumpImpulse / playerSpeed for different "feel".
 
 ---
 

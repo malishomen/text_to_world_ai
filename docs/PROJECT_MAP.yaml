@@ -69,7 +69,7 @@ tech_stack:
       - "@playwright/test 1.49 — e2e smoke suite (web/e2e/, headless Chromium)"
   frontend:
     type: SSR + client islands
-    framework: "React 19 + Three.js 0.184 + @react-three/fiber 9 + @react-three/rapier 2 + @react-three/drei 10 (useGLTF + useTexture for asset consumption with Suspense fallbacks) + Framer Motion 12 + Tailwind 4 + zod 4 + lucide-react"
+    framework: "React 19 + Three.js 0.184 + @react-three/fiber 9 + @react-three/rapier 2 + @react-three/drei 10 (useGLTF + useTexture for asset consumption with Suspense fallbacks) + @react-three/postprocessing 3 (Bloom via EffectComposer) + Framer Motion 12 + Tailwind 4 + zod 4 + lucide-react"
     deps_file: web/package.json
   database:
     engine: none (localStorage only)
@@ -95,6 +95,11 @@ directory_structure:
         generate-assets/route.ts: "POST — SD → 3 PNG sprites under public/generated/<generationId>/; ~2s SD health probe"
         generate-mesh/route.ts: "POST — LLaMA-Mesh (LM Studio multi-model slot) → OBJ-text character mesh under public/generated3d/<generationId>/character.obj. Fully local, no API keys, ~50-60s per call."
     components/:
+      scene/:
+        PostFX.tsx: "Bloom postprocessing wrapper. @react-three/postprocessing EffectComposer + Bloom (intensity 0.6, threshold 0.55, mipmapBlur, radius 0.85). Placed as a Canvas child after DreamScene so it intercepts the scene render."
+        InstancedProps.tsx: "Per-mood instanced 'world props' scattered across the ground (~120-160 instances per dream). Eight mood variants: dead-spike-tree / giant-mushroom / antenna / asteroid / broken-column / glass-spire / candy-obelisk / floating-orb. Deterministic scatter via makeRng(hashString(generationId)); rejection-sampled against platformExclusions so props never spawn under the player's path. Zero per-frame allocations; asteroids rotate via cached Matrix4 + Quaternion refs."
+        GroundMist.tsx: "Low-altitude transparent mist. 10-60 drei Billboard puffs with a CanvasTexture soft-disc alpha mask (generated once, disposed on unmount). Per-instance state in one Float32Array (6 floats). Seeded by levelSeed so the layout is reproducible per dream; wrap-around z values drawn from a 32-entry pre-computed RNG pool to keep useFrame allocation-free. density=0 short-circuits the layer (cosmic/ethereal voids)."
+        DistantRidges.tsx: "Static PlaneGeometry 300×60 with 80×20 segments, per-vertex 2-octave value-noise displacement (peaks only on upper half, base flat). Faces +Z toward the camera at z=-levelDepth-80. flatShading + frustumCulled=false. Geometry disposed on unmount."
       DreamGame3D.tsx: |
         R3F Canvas: Player + Platforms + Enemies + GoalPortal + FollowCamera; seeded RNG via makeRng (Phase 6).
         Tone mapping: THREE.ACESFilmicToneMapping with toneMappingExposure 1.2 (set via onCreated). DO NOT pass numeric toneMapping values — `3` is CineonToneMapping (deprecated, overexposes to white), `4` is ACESFilmic; always use the THREE constant.
@@ -108,6 +113,7 @@ directory_structure:
     lib/:
       fallback-config.ts: "buildFallback(dream) + GameConfig type (Phase A) — single source of truth for default configs"
       with-timeout.ts: "withTimeout(promise, ms, label) helper (Phase B)"
+      rng.ts: "Shared deterministic LCG RNG + cheap string hash. Used by DreamGame3D (level/terrain seed), InstancedProps (prop scatter), GroundMist (puff layout)."
       game-config-schema.ts: "Phase 2: zod schema + parseGameConfig / parseGameConfigExtended normalizer (lenient, never throws). normalizeGenre() is unconditional — always '3d_platformer'."
       generation-id.ts: "Phase 3: ID_PATTERN, isValidGenerationId, normalizeGenerationId, newGenerationId (UTC timestamp + 8 hex)"
       generated-paths.ts: "Phase 3: path-safe builders for public/generated/<id>/ and public/generated3d/<id>/ — buildAssetFsPath / buildAssetUrl / ensureAssetDir / isSafeFilename"
