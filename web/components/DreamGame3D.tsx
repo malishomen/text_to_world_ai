@@ -1699,8 +1699,12 @@ export default function DreamGame3D({
           onLand={onLandHook}
           onStep={onStepHook}
         />
-        {/* Bloom postprocessing — intercepts the render after the scene tree. */}
-        <PostFX />
+        {/* Bloom postprocessing — opt-in via NEXT_PUBLIC_ENABLE_POSTFX=1.
+            Disabled by default: @react-three/postprocessing 3.0.4 + R3F 9 has
+            a "Cannot read properties of null (reading 'alpha')" mount race
+            we couldn't reliably contain. Scene already looks rich enough
+            via emissive materials + per-mood ambient. */}
+        {process.env.NEXT_PUBLIC_ENABLE_POSTFX === '1' && <PostFX />}
       </Canvas>
 
       {/* Mobile / touch hint (P2.12) */}
