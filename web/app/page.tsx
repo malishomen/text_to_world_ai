@@ -64,6 +64,9 @@ export default function Home() {
   const handleSubmit = async () => {
     if (!dreamText.trim()) return;
     setIsSubmitting(true);
+    localStorage.removeItem('gameConfig');
+    localStorage.removeItem('gameAssets');
+    localStorage.removeItem('generationId');
     localStorage.setItem('dreamText', dreamText);
     router.push('/loading-dream');
   };

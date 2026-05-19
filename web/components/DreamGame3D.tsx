@@ -43,7 +43,7 @@ function useKeys() {
 // ─── Spring camera that follows player ───────────────────────────────────────
 function FollowCamera({ target }: { target: React.RefObject<RapierRigidBody | null> }) {
   const { camera } = useThree();
-  const camPos = useRef(new THREE.Vector3(0, 12, -18));
+  const camPos = useRef(new THREE.Vector3(0, 12, 18));
   const lookTarget = useRef(new THREE.Vector3());
   // Cached scratch vectors — avoids `new THREE.Vector3` per frame (GC pressure).
   const desired = useRef(new THREE.Vector3());
@@ -52,7 +52,7 @@ function FollowCamera({ target }: { target: React.RefObject<RapierRigidBody | nu
   useFrame(() => {
     if (!target.current) return;
     const t = target.current.translation();
-    desired.current.set(t.x, t.y + 9, t.z - 16);
+    desired.current.set(t.x, t.y + 9, t.z + 16);
     camPos.current.lerp(desired.current, 0.07);
     camera.position.copy(camPos.current);
     lookScratch.current.set(t.x, t.y + 1.5, t.z);
@@ -130,8 +130,8 @@ function Player({ bodyRef, color, characterUrl, keys, goalPos, enemyPositions, e
 
     // WASD movement in world-space XZ
     let vx = 0, vz = 0;
-    if (k['KeyW'] || k['ArrowUp'])    vz += speed;
-    if (k['KeyS'] || k['ArrowDown'])  vz -= speed;
+    if (k['KeyW'] || k['ArrowUp'])    vz -= speed;
+    if (k['KeyS'] || k['ArrowDown'])  vz += speed;
     if (k['KeyA'] || k['ArrowLeft'])  vx -= speed;
     if (k['KeyD'] || k['ArrowRight']) vx += speed;
     bodyRef.current.setLinvel({ x: vx, y: vel.y, z: vz }, true);
@@ -445,8 +445,8 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       fogDensity: 0.03,
       starsCount: 1500,
       sparklesCount: 40,
-      ambientIntensity: 0.25,
-      directionalIntensity: 1.2,
+      ambientIntensity: 1.0,
+      directionalIntensity: 3.5,
     };
   }
   if (mood === 'cozy_dream') {
@@ -454,16 +454,16 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       fogDensity: 0.006,
       starsCount: 800,
       sparklesCount: 180,
-      ambientIntensity: 0.7,
-      directionalIntensity: 2.5,
+      ambientIntensity: 2.0,
+      directionalIntensity: 6.0,
     };
   }
   return {
     fogDensity: 0.015,
     starsCount: 3000,
     sparklesCount: 120,
-    ambientIntensity: 0.5,
-    directionalIntensity: 2,
+    ambientIntensity: 1.5,
+    directionalIntensity: 5.0,
   };
 }
 
@@ -476,10 +476,10 @@ function generateLevel(config: GameConfig, palette: string[], seedStr: string) {
 
   const rng = makeRng(hashString(seedStr));
 
-  let x = 0, z = 7, y = 0;
+  let x = 0, z = -7, y = 0;
   for (let i = 0; i < count; i++) {
     x += (rng() - 0.5) * 6;
-    z += 5 + rng() * 4;
+    z -= 5 + rng() * 4;
     y += (rng() - 0.2) * 3.5;
     y = Math.max(-2, Math.min(y, 14));
     const w = 3.5 + rng() * 3.5;
@@ -570,15 +570,15 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
       <ambientLight intensity={mp.ambientIntensity} color={p1} />
       <directionalLight position={[15, 30, 10]} intensity={mp.directionalIntensity} color={p0} castShadow
         shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
-      <pointLight position={[-20, 15, -10]} color={p2} intensity={3} distance={60} />
-      <pointLight position={[20, 5, 30]} color={p0} intensity={2} distance={50} />
+      <pointLight position={[-20, 15, -10]} color={p2} intensity={80} distance={60} />
+      <pointLight position={[20, 5, 30]} color={p0} intensity={60} distance={50} />
 
       {/* Environment */}
       <Stars radius={120} depth={60} count={mp.starsCount} factor={5} fade speed={0.4} />
       <Sparkles
         count={mp.sparklesCount}
         scale={[platforms.length * 5, 20, platforms.length * 7]}
-        position={[0, 6, platforms.length * 3.5]}
+        position={[0, 6, -platforms.length * 3.5]}
         size={2}
         speed={0.15}
         color={palette[0]}
@@ -587,7 +587,7 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
       {/* Floating narrative */}
       <Float speed={0.8} floatIntensity={0.3} rotationIntensity={0.05}>
         <Text
-          position={[0, 7, -4]}
+          position={[0, 7, 4]}
           fontSize={0.28}
           color="white"
           anchorX="center"
@@ -694,6 +694,19 @@ export default function DreamGame3D({ config, generationId, assets }: {
     return () => window.removeEventListener('keydown', onKey);
   }, [showFocusHint]);
 
+  // Enter / Space restarts the run from the win or dead overlay.
+  useEffect(() => {
+    if (state === 'playing') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'Space') {
+        e.preventDefault();
+        restart();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [state]);
+
   return (
     <div
       ref={wrapperRef}
@@ -704,8 +717,9 @@ export default function DreamGame3D({ config, generationId, assets }: {
     >
       <Canvas
         shadows
-        camera={{ fov: 65, near: 0.1, far: 600, position: [0, 12, -18] }}
-        gl={{ antialias: true, toneMapping: 3 /* ACESFilmic */ }}
+        camera={{ fov: 65, near: 0.1, far: 600, position: [0, 12, 18] }}
+        gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping }}
+        onCreated={({ gl }) => { gl.toneMappingExposure = 1.2; }}
       >
         <DreamScene
           config={config}
