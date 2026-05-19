@@ -191,6 +191,14 @@ export class AudioEngine {
 
   /** Master gain on the ambient bus. Stinger one-shots bypass it. */
   private masterGain: GainNode | null = null;
+  /**
+   * One-shot bus — narrator MP3s + procedural stingers route through this
+   * GainNode instead of `ctx.destination`. setMuted() ramps it to 0/1 so
+   * the mute toggle silences EVERYTHING, not just the ambient drone.
+   * Intentionally separate from masterGain so ducking doesn't lower the
+   * stinger that triggered the duck.
+   */
+  private oneShotBus: GainNode | null = null;
 
   private currentMood: Mood;
   private currentChain: DroneChain | null = null;
@@ -280,6 +288,9 @@ export class AudioEngine {
         this.masterGain = this.ctx.createGain();
         this.masterGain.gain.value = 0;
         this.masterGain.connect(this.ctx.destination);
+        this.oneShotBus = this.ctx.createGain();
+        this.oneShotBus.gain.value = this.muted ? 0 : 1;
+        this.oneShotBus.connect(this.ctx.destination);
       } catch {
         return 'closed';
       }
@@ -495,7 +506,10 @@ export class AudioEngine {
       src.buffer = buffer!;
       const g = this.ctx.createGain();
       g.gain.value = Math.max(0, volume);
-      src.connect(g).connect(this.ctx.destination);
+      // Route through oneShotBus (mute-aware) instead of ctx.destination.
+      // Fall back to destination if bus hasn't been built (defensive).
+      const sink = this.oneShotBus ?? this.ctx.destination;
+      src.connect(g).connect(sink);
       const settle = () => {
         try {
           src.disconnect();
@@ -542,6 +556,22 @@ export class AudioEngine {
       ? 0
       : (isCurrentlyDucked ? DUCK_GAIN : this._targetGain);
     g.linearRampToValueAtTime(restoreTarget, now + MUTE_RAMP_SEC);
+    // Also mute the one-shot bus (narrator + stingers route through this).
+    if (this.oneShotBus) {
+      const og = this.oneShotBus.gain;
+      og.cancelScheduledValues(now);
+      og.setValueAtTime(og.value, now);
+      og.linearRampToValueAtTime(muted ? 0 : 1, now + MUTE_RAMP_SEC);
+    }
+  }
+
+  /**
+   * Expose the one-shot bus so external SFX (stingers.ts) can route through
+   * it instead of ctx.destination — keeping them mute-aware. Returns null
+   * before unlock() has built the audio graph.
+   */
+  getOneShotBus(): GainNode | null {
+    return this.oneShotBus;
   }
 
   isMuted(): boolean {
@@ -608,6 +638,14 @@ export class AudioEngine {
         // already disconnected
       }
       this.masterGain = null;
+    }
+    if (this.oneShotBus) {
+      try {
+        this.oneShotBus.disconnect();
+      } catch {
+        // already disconnected
+      }
+      this.oneShotBus = null;
     }
 
     if (this.ctx) {

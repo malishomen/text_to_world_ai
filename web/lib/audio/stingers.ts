@@ -108,6 +108,12 @@ export function createStingers(engine: AudioEngine): StingerEngine {
     return engine.getContext();
   }
 
+  /** Mute-aware sink. Routes stingers through the engine's one-shot bus so
+   *  the mute toggle silences them. Falls back to destination if bus null. */
+  function sink(ctx: AudioContext): AudioNode {
+    return engine.getOneShotBus() ?? ctx.destination;
+  }
+
   // -------------------------------------------------------------------------
   // playWorldOpen — 1.5 s rising triad
   // -------------------------------------------------------------------------
@@ -123,7 +129,7 @@ export function createStingers(engine: AudioEngine): StingerEngine {
     // Master gain for this stinger; routed straight to destination.
     const master = ctx.createGain();
     master.gain.value = 0.7;
-    master.connect(ctx.destination);
+    master.connect(sink(ctx));
 
     // Three rising sine voices.
     type Voice = { startOffset: number; from: number; to: number };
@@ -189,7 +195,7 @@ export function createStingers(engine: AudioEngine): StingerEngine {
     master.gain.setValueAtTime(0.0001, t0);
     master.gain.linearRampToValueAtTime(0.7, t0 + 0.05);
     master.gain.exponentialRampToValueAtTime(0.001, t0 + 2.95);
-    master.connect(ctx.destination);
+    master.connect(sink(ctx));
 
     // Major-9 voicing.
     const root = 440;
@@ -296,8 +302,8 @@ export function createStingers(engine: AudioEngine): StingerEngine {
     const wetGain = ctx.createGain();
     wetGain.gain.value = 0.5;
 
-    master.connect(dryGain).connect(ctx.destination);
-    master.connect(convolver).connect(wetGain).connect(ctx.destination);
+    master.connect(dryGain).connect(sink(ctx));
+    master.connect(convolver).connect(wetGain).connect(sink(ctx));
 
     const oscillators: OscillatorNode[] = [];
 

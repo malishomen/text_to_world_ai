@@ -423,6 +423,12 @@ export default function CinematicIntro(
     // ─── Narration fetch ─────────────────────────────────────────────────
     const controller = new AbortController();
     abortRef.current = controller;
+    // Hard cap on the fetch — without it, a slow /api/generate-narration
+    // would leave the user staring at a silent typewriter. Web Speech
+    // fallback kicks in if we hit this timeout.
+    setManagedTimeout(() => {
+      try { controller.abort(); } catch { /* already aborted */ }
+    }, 8000);
 
     const wordCount = Math.max(1, words.length);
     const estFromWords = Math.max(3, wordCount / 4); // 4 wps heuristic
@@ -485,8 +491,21 @@ export default function CinematicIntro(
 
     void runNarrationFlow();
 
+    // pagehide / beforeunload safety net — speechSynthesis can survive a
+    // navigation away from /play (Chrome bug) and keep speaking on the
+    // landing. Cancel hard on page exit. Use pagehide (fires for both
+    // refresh and back/forward) plus beforeunload as belt-and-braces.
+    const cancelSpeechOnPageExit = () => {
+      try { window.speechSynthesis?.cancel(); } catch { /* swallow */ }
+    };
+    window.addEventListener('pagehide', cancelSpeechOnPageExit);
+    window.addEventListener('beforeunload', cancelSpeechOnPageExit);
+
     // ─── Cleanup ─────────────────────────────────────────────────────────
     return () => {
+      // Remove page-exit listeners
+      window.removeEventListener('pagehide', cancelSpeechOnPageExit);
+      window.removeEventListener('beforeunload', cancelSpeechOnPageExit);
       // Cancel typewriter
       typewriterCancelRef.current = true;
       clearAllTimers();

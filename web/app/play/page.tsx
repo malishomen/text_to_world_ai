@@ -217,6 +217,10 @@ export default function PlayPage() {
           generationId={generationId ?? 'no-id'}
           onComplete={() => setIntroDone(true)}
           onEngineReady={(engine) => {
+            // Strict-mode double-mount safety: dispose any prior stinger
+            // engine before creating a new one (otherwise its timers +
+            // oscillators leak on every dev remount).
+            stingerEngineRef.current?.dispose();
             audioEngineRef.current = engine;
             stingerEngineRef.current = createStingers(engine);
           }}
