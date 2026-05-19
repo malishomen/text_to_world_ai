@@ -188,12 +188,16 @@ function Platform({ position, size, color, index }: {
 }
 
 // ─── Enemy ───────────────────────────────────────────────────────────────────
-function Enemy({ position, posRef }: {
+function Enemy({ position, posRef, phaseSeed }: {
   position: [number, number, number];
   posRef: THREE.Vector3;
+  phaseSeed: number;
 }) {
   const meshRef = useRef<THREE.Mesh>(null);
-  const t = useRef(Math.random() * Math.PI * 2);
+  // Phase offset is supplied deterministically by the parent (DreamScene) so
+  // each Enemy starts at a different point in its orbit without calling
+  // impure functions inside `useRef`. See `enemies` useMemo in DreamScene.
+  const t = useRef(phaseSeed);
   const basePos = useRef(new THREE.Vector3(...position));
 
   useFrame((_, delta) => {
@@ -278,6 +282,21 @@ function GoalPortal({ position }: { position: [number, number, number] }) {
   );
 }
 
+// ─── Deterministic RNG (LCG) — top-level, side-effect-free ─────────────────
+// `react-hooks/immutability` rejects closures that mutate captured vars
+// during render, so we keep the seed in an object owned by the caller.
+function makeRng(seed: number) {
+  const state = { s: seed | 0 };
+  return () => {
+    state.s = (state.s * 1664525 + 1013904223) & 0x7fffffff;
+    return state.s / 0x7fffffff;
+  };
+}
+
+function hashString(s: string, salt = 0): number {
+  return s.split('').reduce((acc, c) => acc + c.charCodeAt(0), salt);
+}
+
 // ─── Level generator ─────────────────────────────────────────────────────────
 function generateLevel(config: GameConfig, palette: string[]) {
   const count = Math.max(5, Math.min(config.platforms || 6, 12));
@@ -285,9 +304,7 @@ function generateLevel(config: GameConfig, palette: string[]) {
     { pos: [0, 0, 0], size: [7, 0.8, 7], color: palette[0] },
   ];
 
-  // Seeded RNG using mood string
-  let seed = config.mood.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
-  const rng = () => { seed = (seed * 1664525 + 1013904223) & 0x7fffffff; return seed / 0x7fffffff; };
+  const rng = makeRng(hashString(config.mood || 'dream'));
 
   let x = 0, z = 7, y = 0;
   for (let i = 0; i < count; i++) {
@@ -331,12 +348,16 @@ function DreamScene({ config, restartToken, onWin, onDead }: {
 
   const enemies = useMemo(() => {
     const count = Math.min(config.enemy_count || 3, platforms.length - 1);
+    // Deterministic phase seed per enemy — derived from mood string so the
+    // orbit pattern is reproducible for a given dream. Avoids Math.random()
+    // inside `useRef` initializers (impure during render).
+    const rng = makeRng(hashString(config.mood || 'dream', 17));
     return Array.from({ length: count }, (_, i) => {
       const p = platforms[Math.max(1, Math.round(1 + (i * (platforms.length - 2)) / Math.max(count - 1, 1)))];
       const pos: [number, number, number] = [p.pos[0], p.pos[1] + 1.5, p.pos[2]];
-      return { id: i, pos, posRef: new THREE.Vector3(...pos) };
+      return { id: i, pos, posRef: new THREE.Vector3(...pos), phaseSeed: rng() * Math.PI * 2 };
     });
-  }, [config.enemy_count, platforms]);
+  }, [config.enemy_count, config.mood, platforms]);
 
   // Stable array of enemy Vector3 refs for Player collision sampling.
   // Each Vector3 instance is owned by the corresponding Enemy and mutated in place;
@@ -425,6 +446,7 @@ function DreamScene({ config, restartToken, onWin, onDead }: {
           key={e.id}
           position={e.pos}
           posRef={e.posRef}
+          phaseSeed={e.phaseSeed}
         />
       ))}
 

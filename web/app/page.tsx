@@ -14,14 +14,19 @@ export default function Home() {
   const router = useRouter();
 
   useEffect(() => {
-    const generated = Array.from({ length: 30 }, (_, i) => ({
-      id: i,
-      x: Math.random() * 100,
-      y: Math.random() * 100,
-      size: Math.random() * 3 + 1,
-      delay: Math.random() * 5,
-    }));
-    setParticles(generated);
+    // SSR-safe: random visual jitter is generated client-side only to avoid
+    // hydration mismatch. setState-in-effect is the canonical Next.js App
+    // Router pattern for browser-only initial state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setParticles(
+      Array.from({ length: 30 }, (_, i) => ({
+        id: i,
+        x: Math.random() * 100,
+        y: Math.random() * 100,
+        size: Math.random() * 3 + 1,
+        delay: Math.random() * 5,
+      })),
+    );
   }, []);
 
   const startRecording = () => {

@@ -9,11 +9,6 @@ import type { GameConfig } from '@/components/DreamGame3D';
 // Three.js / Rapier must load client-side only — no SSR
 const DreamGame3D = dynamic(() => import('@/components/DreamGame3D'), { ssr: false });
 
-interface GameAssets {
-  background_url?: string;
-  character_url?: string;
-}
-
 export default function PlayPage() {
   const [config, setConfig] = useState<GameConfig | null>(null);
   const [dreamText, setDreamText] = useState('');
@@ -26,9 +21,14 @@ export default function PlayPage() {
 
     if (!storedConfig) { router.replace('/'); return; }
 
+    // localStorage is client-only — canonical Next.js App Router pattern is
+    // to populate state from it inside an effect, then guard the render via
+    // `loading`. setState-in-effect is unavoidable here.
+    /* eslint-disable react-hooks/set-state-in-effect */
     setConfig(JSON.parse(storedConfig));
     setDreamText(storedDream || '');
     setLoading(false);
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [router]);
 
   const handleNewDream = () => {
