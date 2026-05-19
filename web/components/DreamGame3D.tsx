@@ -46,8 +46,35 @@ function useKeys() {
   return keys;
 }
 
+// ─── Scene FX shared state ───────────────────────────────────────────────────
+// Single ref shared by Player (fires) and FollowCamera (reads) for camera
+// shake + lerp slow-mo on dramatic events. Avoids prop-drilling and keeps
+// useFrame allocation-free.
+export interface SceneFxState {
+  /** Camera shake — peak amplitude in world units, ease-out decay. */
+  shake: { amp: number; durationMs: number; startMs: number } | null;
+  /** When > now, camera lerp damping is reduced to give a slow-motion
+   *  feel. Set on win/death overlays; cleared when restartToken changes. */
+  slowMoUntilMs: number;
+}
+function emptyFx(): SceneFxState {
+  return { shake: null, slowMoUntilMs: 0 };
+}
+function fireShake(fx: { current: SceneFxState }, amp: number, durationMs: number) {
+  fx.current.shake = { amp, durationMs, startMs: performance.now() };
+}
+function fireSlowMo(fx: { current: SceneFxState }, durationMs: number) {
+  fx.current.slowMoUntilMs = performance.now() + durationMs;
+}
+
 // ─── Spring camera that follows player ───────────────────────────────────────
-function FollowCamera({ target }: { target: React.RefObject<RapierRigidBody | null> }) {
+function FollowCamera({
+  target,
+  fxRef,
+}: {
+  target: React.RefObject<RapierRigidBody | null>;
+  fxRef: React.RefObject<SceneFxState>;
+}) {
   const { camera } = useThree();
   const camPos = useRef(new THREE.Vector3(0, 12, 18));
   const lookTarget = useRef(new THREE.Vector3());
@@ -59,10 +86,29 @@ function FollowCamera({ target }: { target: React.RefObject<RapierRigidBody | nu
     if (!target.current) return;
     const t = target.current.translation();
     desired.current.set(t.x, t.y + 9, t.z + 16);
-    camPos.current.lerp(desired.current, 0.07);
+    const fx = fxRef.current;
+    const now = performance.now();
+    // Slow-mo: reduce lerp damping so the camera lazes after the player.
+    const isSlowMo = fx.slowMoUntilMs > now;
+    const posLerp = isSlowMo ? 0.025 : 0.07;
+    const lookLerp = isSlowMo ? 0.04  : 0.10;
+    camPos.current.lerp(desired.current, posLerp);
     camera.position.copy(camPos.current);
+    // Shake: ease-out (1-t)^2 decay around current cam position.
+    if (fx.shake) {
+      const elapsed = now - fx.shake.startMs;
+      if (elapsed < fx.shake.durationMs) {
+        const r = 1 - elapsed / fx.shake.durationMs;
+        const amp = fx.shake.amp * r * r;
+        camera.position.x += (Math.random() - 0.5) * 2 * amp;
+        camera.position.y += (Math.random() - 0.5) * 2 * amp;
+        camera.position.z += (Math.random() - 0.5) * 2 * amp;
+      } else {
+        fx.shake = null;
+      }
+    }
     lookScratch.current.set(t.x, t.y + 1.5, t.z);
-    lookTarget.current.lerp(lookScratch.current, 0.1);
+    lookTarget.current.lerp(lookScratch.current, lookLerp);
     camera.lookAt(lookTarget.current);
   });
   return null;
@@ -222,9 +268,11 @@ interface PlayerProps {
   onJump?: () => void;
   onLand?: () => void;
   onStep?: () => void;
+  /** Path B scene-FX ref — Player fires shake + slow-mo through it. */
+  fxRef?: React.RefObject<SceneFxState>;
 }
 
-function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, character2dUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin, onJump, onLand, onStep }: PlayerProps) {
+function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, character2dUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin, onJump, onLand, onStep, fxRef }: PlayerProps) {
   const grounded = useRef(false);
   const canJump = useRef(true);
   const contacts = useRef(0);
@@ -236,6 +284,9 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, characte
   // Tier S SFX bookkeeping (timing only — actual audio fires via hooks).
   const airborneStartedAt = useRef<number | null>(null);  // timestamp of last jump
   const stepAccum = useRef(0);                              // seconds since last step
+  // Path B: performance.now() until which the player light flashes brighter
+  // from a jump. Linearly decays back to baseline.
+  const jumpPulseUntil = useRef(0);
   // Step cadence ~340 ms = 2.9 steps / second at jogging pace.
   const STEP_INTERVAL_SEC = 0.34;
   // Minimum airborne duration before landing fires a SFX (suppresses
@@ -267,6 +318,9 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, characte
       // Tier S: mark airborne start + fire jump SFX.
       airborneStartedAt.current = performance.now();
       stepAccum.current = 0;                       // reset cadence
+      // Path B: emissive pulse + light shake.
+      jumpPulseUntil.current = performance.now() + 220;
+      if (fxRef) fireShake(fxRef, 0.08, 110);
       onJump?.();
       setTimeout(() => { canJump.current = true; }, 250);
     }
@@ -293,20 +347,30 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, characte
     if (grounded.current && airborneStartedAt.current !== null) {
       const airSec = (performance.now() - airborneStartedAt.current) / 1000;
       airborneStartedAt.current = null;
-      if (airSec >= MIN_AIRBORNE_SEC) onLand?.();
+      if (airSec >= MIN_AIRBORNE_SEC) {
+        onLand?.();
+        // Path B: medium shake on landing — scales with airtime.
+        if (fxRef) fireShake(fxRef, Math.min(0.28, 0.15 + airSec * 0.1), 280);
+      }
     }
 
     // Mesh bob (works for both procedural ball and GLB group)
     if (meshRef.current) meshRef.current.rotation.y += delta * 2;
     if (gltfRef.current) gltfRef.current.rotation.y += delta * 2;
-    // Player light pulse
+    // Player light pulse — base sine + Path B jump-pulse boost (decays
+    // linearly over 220 ms so the player visibly "flashes" on take-off).
     if (lightRef.current) {
-      lightRef.current.intensity = 2.5 + Math.sin(Date.now() * 0.004) * 0.8;
+      const baseline = 2.5 + Math.sin(Date.now() * 0.004) * 0.8;
+      const now = performance.now();
+      const remaining = jumpPulseUntil.current - now;
+      const boost = remaining > 0 ? (remaining / 220) * 4.5 : 0;
+      lightRef.current.intensity = baseline + boost;
     }
 
     // Death by falling
     if (pos.y < -12 && !endedRef.current) {
       endedRef.current = true;
+      if (fxRef) { fireShake(fxRef, 0.7, 500); fireSlowMo(fxRef, 800); }
       onDead();
       return;
     }
@@ -316,6 +380,7 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, characte
     for (const ep of enemyPositions) {
       if (playerVec.current.distanceTo(ep) < 1.4) {
         endedRef.current = true;
+        if (fxRef) { fireShake(fxRef, 0.6, 450); fireSlowMo(fxRef, 700); }
         onDead();
         return;
       }
@@ -324,6 +389,7 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, characte
     // Win
     if (playerVec.current.distanceTo(goalPos) < 2.8 && !endedRef.current) {
       endedRef.current = true;
+      if (fxRef) { fireShake(fxRef, 0.4, 700); fireSlowMo(fxRef, 1200); }
       onWin();
     }
   });
@@ -1237,11 +1303,14 @@ function generateLevel(config: GameConfig, palette: string[], seedStr: string) {
 }
 
 // ─── Main scene ──────────────────────────────────────────────────────────────
-function DreamScene({ config, generationId, assets, restartToken, onWin, onDead, onJump, onLand, onStep }: {
+function DreamScene({ config, generationId, assets, restartToken, sceneState, onWin, onDead, onJump, onLand, onStep }: {
   config: GameConfig;
   generationId?: string;
   assets?: GameAssets;
   restartToken: number;
+  /** Path B — propagated from the outer DreamGame3D so we can mount the
+   *  in-canvas win particle burst at goalPos. */
+  sceneState: 'playing' | 'won' | 'dead';
   onWin: () => void;
   onDead: () => void;
   onJump?: () => void;
@@ -1250,6 +1319,9 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead,
 }) {
   const playerRef = useRef<RapierRigidBody>(null);
   const keys = useKeys();
+  // Path B: scene FX (shake + slow-mo) shared between Player firing and
+  // FollowCamera consuming. One stable ref, never reassigned.
+  const fxRef = useRef<SceneFxState>(emptyFx());
   const endedRef = useRef(false);
 
   // Seed string: prefer caller-provided generationId so same-id-same-level;
@@ -1299,6 +1371,10 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead,
     playerRef.current?.setAngvel({ x: 0, y: 0, z: 0 }, true);
     playerRef.current?.setTranslation({ x: 0, y: 4, z: 0 }, true);
     playerRef.current?.wakeUp();
+    // Path B: clear any pending scene FX so a restart doesn't inherit
+    // shake/slow-mo from the prior life.
+    fxRef.current.shake = null;
+    fxRef.current.slowMoUntilMs = 0;
   }, [restartToken]);
 
   const mp = useMemo(() => moodPresetFor(config.mood), [config.mood]);
@@ -1460,6 +1536,7 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead,
           onJump={onJump}
           onLand={onLand}
           onStep={onStep}
+          fxRef={fxRef}
         />
 
         {/* Platforms */}
@@ -1495,8 +1572,26 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead,
         portalUrl={assets?.portal_3d ?? null}
       />
 
+      {/* Path B: win burst — Sparkles cloud + bright point light mounted
+          at goalPos while state==='won'. Unmounts automatically on restart
+          (state flips back to 'playing'). */}
+      {sceneState === 'won' && (
+        <group position={[goalPos.x, goalPos.y, goalPos.z]}>
+          <Sparkles count={140} scale={6} size={5} speed={1.2} color={palette[0]} />
+          <Sparkles count={80}  scale={10} size={3} speed={0.6} color="#ffffff" />
+          <pointLight color={palette[0]} intensity={120} distance={30} decay={1.5} />
+          <pointLight color="#ffffff"      intensity={60}  distance={20} decay={1.5} />
+        </group>
+      )}
+
+      {/* Path B: death pulse — single fading dark sub-bass light at player
+          spawn so the world visibly "drops" on a loss. */}
+      {sceneState === 'dead' && (
+        <pointLight position={[0, 4, 0]} color="#330011" intensity={40} distance={50} decay={1.0} />
+      )}
+
       {/* Camera */}
-      <FollowCamera target={playerRef} />
+      <FollowCamera target={playerRef} fxRef={fxRef} />
     </>
   );
 }
@@ -1594,6 +1689,7 @@ export default function DreamGame3D({
           generationId={generationId}
           assets={assets}
           restartToken={restartToken}
+          sceneState={state}
           onWin={() => { onWinHook?.(); setState('won'); }}
           onDead={() => { onDeadHook?.(); setState('dead'); }}
           onJump={onJumpHook}
