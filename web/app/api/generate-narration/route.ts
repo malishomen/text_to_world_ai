@@ -28,7 +28,11 @@ import { isValidGenerationId } from '@/lib/generation-id';
 
 const MAX_NARRATIVE_CHARS = 600;
 const ELEVENLABS_TIMEOUT_MS = 60_000;
-const ELEVENLABS_MODEL_ID = 'eleven_turbo_v2_5';
+// eleven_multilingual_v2 — expressive, broadcast-quality, same per-char
+// billing as Turbo v2.5. Picked over Turbo for "wow" demo quality after
+// the prompt-engineering upgrade. Override per-call via the
+// `ELEVENLABS_MODEL` env if you need to fall back.
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL || 'eleven_multilingual_v2';
 
 // 8-mood enum — must mirror `Mood` in web/lib/audio/AudioEngine.ts.
 const MOODS = [
@@ -46,15 +50,19 @@ const DEFAULT_MOOD: Mood = 'surreal_calm';
 
 // Voice IDs — ElevenLabs public-library defaults (stable across accounts).
 // See `.agent-tier-s-contract.md` and docs/PLAN_TIER_S.md.
+// Voice cast per mood. Duplicates from the v1 plan eliminated — whimsical
+// used to share Bella with cozy_dream which made the two demos sound
+// identical, and surreal_calm shared Rachel with cyber_dream. The new
+// cast gives every mood a recognisably different timbre/age/energy.
 const VOICE_ID_BY_MOOD: Readonly<Record<Mood, string>> = {
-  nightmare:    'pNInz6obpgDQGcFmaJgB', // Adam, deep male
-  cozy_dream:   'EXAVITQu4vr4xnSDxMaL', // Bella, warm female
-  cyber_dream:  '21m00Tcm4TlvDq8ikWAM', // Rachel, clear female
-  cosmic:       '29vD33N1CtxCmqQRPOHJ', // Drew, calm male
-  dark_fantasy: 'ErXwobaYiN019PkySvjV', // Antoni, narrator male
-  ethereal:     'AZnzlk1XvdvUeBnXmlld', // Domi, breathy female
-  whimsical:    'EXAVITQu4vr4xnSDxMaL', // Bella, playful female
-  surreal_calm: '21m00Tcm4TlvDq8ikWAM', // Rachel, neutral
+  nightmare:    'pNInz6obpgDQGcFmaJgB', // Adam — deep American male, dread-capable
+  dark_fantasy: 'ErXwobaYiN019PkySvjV', // Antoni — mid-male narrator, gothic
+  cozy_dream:   'EXAVITQu4vr4xnSDxMaL', // Bella — warm, soft, bedtime-story
+  cyber_dream:  '21m00Tcm4TlvDq8ikWAM', // Rachel — clear modern female, urgent
+  cosmic:       '29vD33N1CtxCmqQRPOHJ', // Drew — calm male, slow wonder
+  ethereal:     'AZnzlk1XvdvUeBnXmlld', // Domi — breathy female, light/glassy
+  whimsical:    'MF3mGyEYCl7XYWbV9V6O', // Elli — young, expressive, playful (NEW)
+  surreal_calm: 'CYw3kZ02Hs0563khs1Fj', // Dave — neutral British male storyteller (NEW)
 };
 
 interface VoiceSettings {
@@ -64,21 +72,95 @@ interface VoiceSettings {
   use_speaker_boost: boolean;
 }
 
-// Per-mood voice settings — tuned in the contract sheet.
+// Per-mood voice settings — wider expressive range than the v1 plan.
+// ElevenLabs voice_settings semantics:
+//   stability        — lower (0.30-0.45) ⇒ more emotional variation, more
+//                      breathy / unstable delivery. Higher (0.60-0.85) ⇒
+//                      monotone, predictable, broadcast-news flat.
+//                      For DRAMATIC moods we WANT instability.
+//   style            — higher (0.45-0.70) ⇒ accent/emphasis exaggerated;
+//                      reads as performative, theatrical. Higher than ~0.75
+//                      starts distorting on Multilingual v2.
+//   similarity_boost — kept at 0.75 across the cast (default).
+//   use_speaker_boost — always on; reduces breath/sibilance artefacts.
 function voiceSettingsForMood(mood: Mood): VoiceSettings {
   switch (mood) {
     case 'nightmare':
+      // Whispered fear, breath in the voice.
+      return { stability: 0.35, similarity_boost: 0.75, style: 0.65, use_speaker_boost: true };
     case 'dark_fantasy':
-      return { stability: 0.65, similarity_boost: 0.75, style: 0.3, use_speaker_boost: true };
-    case 'cozy_dream':
-    case 'whimsical':
-    case 'ethereal':
-      return { stability: 0.50, similarity_boost: 0.75, style: 0.2, use_speaker_boost: true };
-    case 'cyber_dream':
+      // Gothic narrator with weight.
+      return { stability: 0.42, similarity_boost: 0.75, style: 0.55, use_speaker_boost: true };
     case 'cosmic':
+      // Slow wonder, distant.
+      return { stability: 0.45, similarity_boost: 0.75, style: 0.40, use_speaker_boost: true };
+    case 'ethereal':
+      // Light, wispy, almost-whispered.
+      return { stability: 0.40, similarity_boost: 0.75, style: 0.50, use_speaker_boost: true };
+    case 'cozy_dream':
+      // Warm and soft; little drama, lots of cadence.
+      return { stability: 0.55, similarity_boost: 0.75, style: 0.35, use_speaker_boost: true };
+    case 'cyber_dream':
+      // Clipped, urgent, slightly mechanical.
+      return { stability: 0.50, similarity_boost: 0.75, style: 0.40, use_speaker_boost: true };
+    case 'whimsical':
+      // Playful, varied, theatrical.
+      return { stability: 0.42, similarity_boost: 0.75, style: 0.55, use_speaker_boost: true };
     case 'surreal_calm':
-      return { stability: 0.55, similarity_boost: 0.75, style: 0.15, use_speaker_boost: true };
+      // Neutral wash — narrator presence without drama.
+      return { stability: 0.50, similarity_boost: 0.75, style: 0.30, use_speaker_boost: true };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Prompt engineering — shape the input string so ElevenLabs reads with the
+// pacing a mood deserves. Multilingual v2 takes pacing cues primarily from
+// PUNCTUATION (commas, periods, ellipses, em-dashes). We don't use SSML
+// because Multilingual v2 doesn't reliably honour <break> tags.
+// ---------------------------------------------------------------------------
+
+function engineerPromptForMood(text: string, mood: Mood): string {
+  let t = text.trim();
+
+  // "Slow" moods get an explicit pause inserted between sentences —
+  // replace ". <Capital>" with "... <Capital>" so the narrator audibly
+  // breathes between thoughts.
+  const slow =
+    mood === 'nightmare' ||
+    mood === 'dark_fantasy' ||
+    mood === 'cosmic' ||
+    mood === 'ethereal' ||
+    mood === 'surreal_calm';
+  if (slow) {
+    t = t.replace(/(\w)\.\s+([A-Z])/g, '$1... $2');
+  }
+
+  // "Lingering" moods get a trailing ellipsis instead of a period — leaves
+  // the listener suspended at the end of the narration so the fade-in lands
+  // on quiet space, not a hard full stop.
+  const linger =
+    mood === 'nightmare' ||
+    mood === 'cosmic' ||
+    mood === 'ethereal';
+  if (linger) {
+    // Only swap if narration already ends with a period and isn't already
+    // ellipsis. The Unicode ellipsis is preserved if present.
+    t = t.replace(/(\w)\.\s*$/, '$1…');
+  }
+
+  // "Urgent" moods get an em-dash break for the second sentence's opening —
+  // forces a sharp narrative pivot rather than a settled period.
+  // (Best-effort: only insert after the FIRST sentence's period.)
+  if (mood === 'cyber_dream' || mood === 'whimsical') {
+    let replaced = false;
+    t = t.replace(/(\w)\.\s+([A-Z])/g, (_m, a: string, b: string) => {
+      if (replaced) return `${a}. ${b}`;
+      replaced = true;
+      return `${a} — ${b}`;
+    });
+  }
+
+  return t;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +265,7 @@ export async function POST(req: NextRequest) {
         Accept: 'audio/mpeg',
       },
       body: JSON.stringify({
-        text: narrative,
+        text: engineerPromptForMood(narrative, mood),
         model_id: ELEVENLABS_MODEL_ID,
         voice_settings: voiceSettings,
       }),
