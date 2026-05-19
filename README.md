@@ -21,6 +21,51 @@ visuals. The result: a hackathon demo that never gets stuck on a loading screen.
 
 ---
 
+## Assets are decorative — the game never blocks on them
+
+The 3D playable scene is **procedural by default**. The `GameConfig` produced
+by `/api/analyze` (or by the keyword fallback when the LLM is offline) is
+sufficient on its own to render a complete, playable level — platforms, player,
+enemies, portal, palette, and music prompt. The LLM, Stable Diffusion, and
+TRELLIS layers exist only to *enrich* what is already a working scene.
+
+When SD or TRELLIS eventually produce assets (PNG textures, GLB models), they
+are applied to the running scene via React Suspense fallbacks. `DreamGame3D`
+uses `useGLTF` and `useTexture` from `@react-three/drei`, both of which
+suspend the consuming component until the asset is ready and substitute the
+procedural placeholder until then. **The game never blocks on asset loading.**
+A failed network fetch, a 404, or a slow CDN response simply leaves the
+procedural placeholder in place; the game keeps playing.
+
+---
+
+## Late asset delivery — assets that arrive after `/play` mounts
+
+The asset jobs (`/api/generate-3d` for GLBs, `/api/generate-assets` for PNGs)
+are slow: 30-90 seconds each for the full TRELLIS pipeline. They almost always
+finish AFTER the user has navigated from `/loading-dream` to `/play`. Phase P0
+rebuilt the asset pipeline so this is no longer a problem:
+
+1. `/api/analyze` returns the normalized `GameConfig` in 2-25 seconds.
+2. `/loading-dream` fires `/api/generate-assets` and `/api/generate-3d` as
+   **fire-and-forget** requests — no `AbortSignal` tied to the navigation. The
+   requests survive the route change to `/play`.
+3. When either response lands, the loading page writes the result into
+   `localStorage.gameAssets` and dispatches a `dreamAssetsUpdated`
+   `CustomEvent` on `window`.
+4. `/play` registers two listeners on mount: a `window` listener for the
+   `dreamAssetsUpdated` event (same-tab updates) **and** a `storage` listener
+   (cross-tab updates from `localStorage` changes). Both push the new assets
+   into `DreamGame3D` as props.
+5. `DreamGame3D` re-renders. `useGLTF` / `useTexture` suspend on the new URLs,
+   show the procedural placeholder while loading, then swap in the real asset.
+
+**No page reload is required.** Open DevTools → Application → Local Storage to
+watch `gameAssets` get written, then look at the canvas — the textures swap
+in over the procedural fallback within one frame of the network response.
+
+---
+
 ## Demo paths
 
 There are four ways to run the demo, ranging from "nothing required" to "full AI stack".
@@ -98,7 +143,7 @@ Two ways to run TRELLIS:
 Note: TRELLIS is long-running (45-90s per asset). The hard client timeout
 (`NEXT_PUBLIC_MAX_GENERATION_MS`, default 75s) will navigate the user to `/play`
 before TRELLIS finishes — the 3D models stream into the scene afterwards
-(fire-and-forget).
+(fire-and-forget; see the "Late asset delivery" section above).
 
 ---
 
@@ -120,6 +165,8 @@ Flow:
    reach the portal to win.
 
 In fake-AI mode the round-trip from input to playable scene takes ~3 seconds.
+Useful for testing the 3D scene without LM Studio, SD, or TRELLIS installed
+locally.
 
 ---
 
@@ -160,23 +207,27 @@ server-only.
         |                                                 |
         v                                                 v
   2. POST /api/generate-3d                  3. POST /api/generate-assets
-        |                                                 |
-        |  (config, generationId)                         |  (config, generationId)
-        v                                                 v
+        |  (fire-and-forget — no AbortSignal)              |  (fire-and-forget)
+        |  (config, generationId)                          |  (config, generationId)
+        v                                                  v
   SD → reference PNG                          SD → PNG sprites
   TRELLIS → 3 GLBs                            background/character/platform.png
   public/generated3d/<id>/                    public/generated/<id>/
-        |                                                 |
-        +--- (fire-and-forget) ---+--- (fire-and-forget) +
+        |                                                  |
+        +----- localStorage.gameAssets + dreamAssetsUpdated event -----+
                                   |
                   Hard timer at NEXT_PUBLIC_MAX_GENERATION_MS
-                  OR Promise.allSettled — whichever first
+                  OR /api/analyze settles — whichever first
                                   |
                                   v
                               /play
                                   |
-                       DreamGame3D mounts
-                       (R3F + Rapier + drei)
+                       DreamGame3D mounts (procedural)
+                                  |
+                       dreamAssetsUpdated arrives
+                                  |
+                       <Suspense> swaps in real assets
+                       (R3F + Rapier + drei useGLTF/useTexture)
 ```
 
 Notes:
@@ -187,6 +238,7 @@ Notes:
   `public/generated/<id>/` and `public/generated3d/<id>/` so concurrent or
   re-tried generations cannot stomp on each other.
 - `/play` requires `gameConfig` in `localStorage`; direct hits bounce back to `/`.
+- Asset delivery is fully decoupled from navigation. See "Late asset delivery".
 
 ---
 
@@ -206,21 +258,24 @@ DreamAI/
 ├── web/                       # Next.js 16 web app (PRIMARY demo path)
 │   ├── app/                   # App Router pages and API routes
 │   │   ├── page.tsx           # Landing — dream input
-│   │   ├── loading-dream/     # Orchestrator + hard timer
-│   │   ├── play/              # 3D game shell
+│   │   ├── loading-dream/     # Orchestrator + hard timer + fire-and-forget assets
+│   │   ├── play/              # 3D game shell + dreamAssetsUpdated listener
 │   │   └── api/
-│   │       ├── analyze/       # POST → GameConfig via LLM
-│   │       ├── generate-3d/   # POST → GLBs via TRELLIS
-│   │       └── generate-assets/  # POST → PNGs via SD
+│   │       ├── analyze/       # POST → GameConfig via LLM (incl. extended fields)
+│   │       ├── generate-3d/   # POST → GLBs via TRELLIS (parseGameConfigExtended)
+│   │       └── generate-assets/  # POST → PNGs via SD (parseGameConfig)
 │   ├── components/
-│   │   └── DreamGame3D.tsx    # R3F Canvas: Player, Platforms, Portal
+│   │   └── DreamGame3D.tsx    # R3F Canvas: Player, Platforms, Portal (useGLTF/useTexture)
 │   ├── lib/                   # Pure helpers (no I/O at import time)
 │   │   ├── fallback-config.ts     # GameConfig type + buildFallback
 │   │   ├── with-timeout.ts        # Promise timeout wrapper
-│   │   ├── game-config-schema.ts  # zod schema + parseGameConfig
+│   │   ├── game-config-schema.ts  # zod schema + parseGameConfig / parseGameConfigExtended
 │   │   ├── generation-id.ts       # ID validation + newGenerationId
 │   │   ├── generated-paths.ts     # path-safe builders for public/generated*
+│   │   ├── game-assets.ts         # GameAssets type, mergeAssetResponses, dreamAssetsUpdated event name
 │   │   └── api-errors.ts          # badRequest / fallbackOk / logApiError
+│   ├── e2e/                   # Playwright smoke specs (smoke.spec.ts)
+│   ├── playwright.config.ts   # Headless Chromium config; webServer auto-starts dev
 │   ├── public/
 │   │   ├── generated/         # 2D output — gitignored, per-id subdirs
 │   │   └── generated3d/       # 3D output — gitignored, per-id subdirs
@@ -248,15 +303,17 @@ repo are experimental / not in the main demo path.
 ## Tech stack (truthful)
 
 - **Frontend:** Next.js **16**.2 (App Router, React **19**.2), Three.js 0.184,
-  `@react-three/fiber` 9, `@react-three/rapier` 2, `@react-three/drei` 10,
+  `@react-three/fiber` 9, `@react-three/rapier` 2, `@react-three/drei` 10
+  (with `useGLTF` and `useTexture` consumers for late-arriving 3D / 2D assets),
   Tailwind CSS 4, Framer Motion 12, `lucide-react`.
 - **Schema:** `zod` 4 (`web/lib/game-config-schema.ts`).
 - **LLM:** OpenAI-compatible HTTP API. **Default is LM Studio at `:1234`**;
   Ollama also works at `:11434`.
 - **Image gen (optional):** Automatic1111 SD WebUI at `:7860`.
 - **3D gen (optional):** TRELLIS via HuggingFace Space (default) or local Gradio.
-- **Tests:** Vitest is the chosen runner; tests for `lib/` helpers are added
-  alongside the 12-phase plan in `web/lib/__tests__/`.
+- **Unit tests:** **Vitest 4** (213 cases in `web/lib/__tests__/`, all green).
+- **E2E tests:** **`@playwright/test` 1.49** (11 smoke cases in `web/e2e/`,
+  headless Chromium, see `web/playwright.config.ts`).
 - **Experimental / legacy:** Python orchestrator under `agents/` and Godot 4
   export shell under `godot/`. Not in the demo path — see `LEGACY.md`.
 
@@ -272,8 +329,28 @@ From `web/package.json`:
 | `npm run build` | Production build. |
 | `npm run start` | Serve the production build. |
 | `npm run lint` | Run ESLint (`eslint-config-next`). |
+| `npm run typecheck` | Run TypeScript in `--noEmit` mode (no JS output). |
+| `npm run test` | Run Vitest in one-shot mode (CI-friendly). |
+| `npm run test:watch` | Run Vitest in watch mode (rerun on file changes). |
+| `npm run test:e2e` | Run Playwright e2e suite (headless Chromium). |
+| `npm run test:e2e:install` | Install Chromium browser binary required by Playwright. |
+| `npm run check` | `lint && typecheck && test` — the standard CI gate. |
+| `npm run check:full` | `check && test:e2e` — full CI gate including e2e. |
 
-Type checking is available via `npx tsc --noEmit` from `web/`.
+---
+
+## Known non-blocking console warnings
+
+You may see these in the browser DevTools console when running `/play`. Both
+come from `@react-three/drei` / Three.js internals (not our code) and are
+non-blocking:
+
+- `THREE.Clock: getDelta() ... deprecated` — from the R3F render loop.
+- `THREE.PCFSoftShadowMap is deprecated` — drei uses it under the hood for soft
+  shadows.
+
+Both are scheduled for removal in future Three.js / drei releases. No action
+required on our side.
 
 ---
 
@@ -300,7 +377,12 @@ follow-up 12-phase plan added zod-based schema validation (Phase 2),
 `generationId` isolation for per-run asset directories (Phase 3), API hardening
 with structured errors and secret redaction (Phase 5), responsive UI fixes
 (Phase 7-8), deterministic level seeding (Phase 6 — `makeRng` in
-`DreamGame3D`), Vitest tests for `lib/` helpers (Phase 11), and these docs (Phases 9-10).
+`DreamGame3D`), Vitest tests for `lib/` helpers (Phase 11), and these docs
+(Phases 9-10). The most recent **P0–P4 quality plan** added the
+`dreamAssetsUpdated` event pipeline for late-arriving assets, strict
+`parseGameConfigExtended` validation in `/api/generate-3d`, the `game-assets.ts`
+module with `GameAssets` type + `mergeAssetResponses`, 35 additional unit
+tests (213 total), and the 11-case Playwright smoke suite.
 
 ---
 

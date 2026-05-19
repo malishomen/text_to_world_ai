@@ -238,6 +238,94 @@ full audit + final report.
 
 ---
 
+### 2026-05-19: P0–P4 quality plan shipped (real bugs closed, e2e green)
+**Request:** Execute the 12-phase quality plan (P0–P5) audit; fix every real
+bug found; ship green tests and green e2e; defer P5 to a later milestone.
+
+**Findings (root-cause survey across the 12 phases):**
+- P0.1 — `/api/generate-3d` deep-trusted body.config (no schema validation).
+- P0.2 — `/api/generate-assets` deep-trusted body.config likewise.
+- P0.3 — `/loading-dream` tied its fire-and-forget asset fetches to an
+  AbortController that fired on navigation, so the assets were aborted
+  the moment we navigated to /play.
+- P0.4 — `/play` only read gameAssets from localStorage on mount; assets
+  that arrived after mount were invisible without a manual refresh.
+- P1.5 — `normalizeGenre()` had branching logic; could in theory return
+  a non-3D value if an LLM produced a string we recognized.
+- P1.6 — analyze route silently dropped extended LLM fields (meshy_*,
+  weather, time_of_day, fog_density, etc.) on the floor.
+- P1.7 — DreamGame3D held character_url ambiguity: same field name used
+  for both /generated/<id>/character.png (2D) and /generated3d/<id>/character.glb (3D).
+- P1.8 — Missing a11y: textarea/mic on `/` and Export modal on `/play`.
+- P2.9 — No test coverage for the parseGameConfigExtended path.
+- P2.11 — No explicit attack-surface tests for buildAssetFsPath / buildAssetUrl.
+- P2.12 — No e2e smoke coverage at all (Playwright was "planned").
+- P3.13 — README pre-dated the P0 work; "assets are decorative" not
+  documented anywhere; "Late asset delivery" pipeline undocumented.
+- P3.14 — TROUBLESHOOTING.md still listed the late-asset-pickup as an
+  unresolved limitation.
+- P4 — PROJECT_MAP.yaml + memory.md out of sync with shipped behavior.
+
+**Changes:**
+- P0.1 fix — `/api/generate-3d` now runs body.config through
+  parseGameConfigExtended; rejects non-object configs at the door.
+- P0.2 fix — `/api/generate-assets` now runs body.config through
+  parseGameConfig; rejects non-object configs.
+- P0.3 fix — `/loading-dream` removes the AbortSignal from the asset
+  fetches. Requests survive navigation. On settle they write
+  localStorage.gameAssets via mergeAssetResponses and dispatch a
+  CustomEvent('dreamAssetsUpdated') on window.
+- P0.4 fix — `/play` registers two listeners on mount:
+  - window 'dreamAssetsUpdated' (same-tab updates)
+  - window 'storage' (cross-tab updates)
+  Both push the new assets into DreamGame3D, which re-renders. drei's
+  useGLTF / useTexture suspend on the new URLs and swap procedural →
+  real asset via React Suspense (no reload).
+- P1.5 — `normalizeGenre()` is now unconditional `return '3d_platformer'`.
+- P1.6 — `analyze` returns the extended GameConfig shape; new
+  `parseGameConfigExtended` preserves meshy_*, weather, time_of_day,
+  fog_density, terrain_height_scale, godot_environment_hints.
+- P1.7 — New `web/lib/game-assets.ts`: GameAssets type, NO_ASSETS,
+  DREAM_ASSETS_UPDATED_EVENT constant, isGameAssets guard,
+  mergeAssetResponses. Disambiguates 2D vs 3D character_url between routes.
+- P1.8 — a11y on textarea + mic on `/`; Export modal a11y on `/play`;
+  mobile touch hint in DreamGame3D.
+- P2.9 — `parseGameConfigExtended` test block in
+  web/lib/__tests__/game-config-schema.test.ts (7 cases).
+- P2.11 — "Path security — explicit attack surface" block in
+  web/lib/__tests__/generated-paths.test.ts (22 cases covering filename
+  attack, generationId attack, cwd attack, and URL builder attacks).
+- P2.12 — `web/playwright.config.ts` + `web/e2e/smoke.spec.ts` (11 cases:
+  home, loading, play, modal, responsive, redirects). New scripts:
+  test:e2e, test:e2e:install, check:full. devDep @playwright/test 1.49.
+- P3.13 — README.md rewritten: "Assets are decorative" section,
+  "Late asset delivery" pipeline, drei useGLTF/useTexture in tech stack,
+  full 10-script table, known non-blocking warnings (THREE.Clock,
+  PCFSoftShadowMap), dev-mode shortcut clarified.
+- P3.14 — TROUBLESHOOTING.md: late-asset-pickup section flagged
+  **(RESOLVED)** with the new pipeline + DevTools verification steps.
+  New sections: Playwright browser not installed, mobile hint on desktop,
+  GLB CORS/404 fallback.
+- P4 — PROJECT_MAP.yaml: added game-assets.ts, e2e/smoke.spec.ts,
+  playwright.config.ts entries; updated api.endpoints.generation to
+  reflect schema validation; testing.backend.runners gained test:e2e
+  + check:full; testing.frontend.automation now lists Playwright 1.49;
+  workflows.dream_to_world rewritten step-by-step around the
+  dreamAssetsUpdated pipeline. memory.md: this entry + § 5 refreshed.
+
+**Current state:**
+- 213 unit tests + 11 e2e smoke cases — all green.
+- `npm run check` passes (lint + typecheck + vitest).
+- `npm run check:full` passes (above + Playwright).
+- `npm run build` succeeds with 0 type errors, 0 lint errors.
+- Branch HEAD: `test` at `(post-commit)` (parent will fill exact hash).
+
+**Remaining / artifacts:**
+- P5 deferred (separate milestone — production hardening, telemetry,
+  audio playback for music_prompt, structured logger, parallel TRELLIS).
+
+---
+
 ### 2026-05-19: Trinity installed + audited FIX_PLAN committed + repo bootstrapped
 **Request:** Audit existing project, find the cause of "infinite generation/render",
 write a full fix plan, initialize GitHub repo with `test` and `main` branches,
@@ -279,12 +367,12 @@ project-memory-trinity skill.
 
 ## 5. Current operational state
 
-**Live environments (as of 2026-05-19):**
+**Live environments (as of 2026-05-19, post-P0–P4):**
 | Component | Status | Location |
 |---|---|---|
 | GitHub repo | ✅ live | https://github.com/malishomen/text_to_world_ai |
 | `main` branch | ✅ at a66d7d9 (Phase A–D + trinity merged) | origin/main |
-| `test` branch | ✅ at 790ff4f (+5 commits ahead: Phases 1–12 shipped) | origin/test |
+| `test` branch | ✅ at `(post-commit)` — P0–P4 shipped | origin/test |
 | Next.js dev server | ⏸ not started in this session | `cd web && npm run dev` |
 | LM Studio (Qwen3-coder) | ❓ unknown — depends on user | localhost:1234 |
 | Stable Diffusion A1111 | ❓ unknown | 127.0.0.1:7860 |
@@ -294,18 +382,42 @@ project-memory-trinity skill.
 | Phase C — /play defenses | ✅ shipped | web/app/play/page.tsx, web/.env.local.example |
 | Phase D — game refactor | ✅ shipped | web/components/DreamGame3D.tsx |
 | Phase E — polish | ⏸ deferred (post-demo) | — |
+| **P0.1** — /api/generate-3d schema validation | ✅ shipped | web/app/api/generate-3d/route.ts (parseGameConfigExtended) |
+| **P0.2** — /api/generate-assets schema validation | ✅ shipped | web/app/api/generate-assets/route.ts (parseGameConfig) |
+| **P0.3** — fire-and-forget assets survive navigation | ✅ shipped | web/app/loading-dream/page.tsx (no AbortSignal on asset fetches) |
+| **P0.4** — /play receives late-arriving assets | ✅ shipped | web/app/play/page.tsx (dreamAssetsUpdated + storage listeners) |
+| **P1.5** — normalizeGenre unconditional 3d_platformer | ✅ shipped | web/lib/game-config-schema.ts |
+| **P1.6** — analyze returns extended GameConfig | ✅ shipped | web/app/api/analyze/route.ts (parseGameConfigExtended) |
+| **P1.7** — game-assets.ts disambiguates 2D/3D character_url | ✅ shipped | web/lib/game-assets.ts (GameAssets, NO_ASSETS, mergeAssetResponses) |
+| **P1.8** — a11y on textarea, mic, Export modal + mobile hint | ✅ shipped | web/app/page.tsx, web/app/play/page.tsx, web/components/DreamGame3D.tsx |
+| **P2.9** — parseGameConfigExtended test coverage | ✅ shipped | web/lib/__tests__/game-config-schema.test.ts (+7 cases) |
+| **P2.11** — path-security attack-surface tests | ✅ shipped | web/lib/__tests__/generated-paths.test.ts (+22 cases) |
+| **P2.12** — Playwright smoke suite | ✅ shipped | web/playwright.config.ts, web/e2e/smoke.spec.ts (11 cases) |
+| **P3.13** — README rewritten (P0 pipeline + 10 scripts) | ✅ shipped | README.md |
+| **P3.14** — TROUBLESHOOTING (late-asset gap RESOLVED) | ✅ shipped | TROUBLESHOOTING.md |
+| **P4** — PROJECT_MAP.yaml + memory.md synced | ✅ shipped | docs/PROJECT_MAP.yaml, memory.md |
+| **P5** — production hardening | ⏸ **DEFERRED** (separate milestone) | — |
 
-**What's missing / deferred:**
-- Phase E polish (parallel TRELLIS on self-host, structured logger, GODOT_DIR opt-in env gate).
+**Test counts (after recovery):**
+- Vitest: 213 / 213 passing (7 files).
+- Playwright: 11 / 11 passing (1 spec, headless Chromium).
+- `npm run check` — all three pass.
+- `npm run check:full` — all four pass (lint + typecheck + vitest + playwright).
+
+**What's missing / deferred (P5 — separate milestone):**
+- Production hardening (rate limits, request signing, structured JSON logs).
 - Audio (`music_prompt` field is generated but never played).
-- Playwright / automated end-to-end test for the dream→play happy path.
-- Pre-existing lint issues NOT in fix scope: `Math.random()` inside `useRef()` initializer in `Enemy` (DreamGame3D.tsx:196); `setConfig` inside `useEffect` in `app/play/page.tsx`; `setParticles` inside `useEffect` in `app/page.tsx`; unused `GameAssets` interface in `play/page.tsx`. None affect runtime; clean up post-demo.
+- Parallel TRELLIS on self-host (currently sequential).
+- Telemetry / observability for the asset-arrival pipeline.
 
 **Where to look when X breaks:**
 - "/loading-dream never reaches /play" → `agent.md § 3.3` + `FIX_PLAN.md § Phase A`.
 - "Sidebar shows 2d platformer" → `web/lib/fallback-config.ts` (Phase A.2).
 - "Gradio Client hangs" → `web/lib/with-timeout.ts` + `agent.md § 3.4`.
 - "Scene crashes on restart" → `FIX_PLAN.md § Phase D`.
+- "Late asset never appears on /play" → `TROUBLESHOOTING.md § Fire-and-forget assets (RESOLVED)` + `web/app/play/page.tsx` listeners.
+- "Playwright browser not installed" → `cd web && npm run test:e2e:install` (one-time per machine).
+- "GLB returns 404 — fallback expected" → `TROUBLESHOOTING.md § 3D asset GLB fails to load`.
 
 ---
 

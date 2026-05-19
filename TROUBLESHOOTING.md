@@ -138,7 +138,7 @@ TRELLIS_URL=JeffreyXiang/TRELLIS-image-large
 
 ## `/loading-dream` issues
 
-### Page stuck on "Launching Godot engine..." (or similar)
+### Page stuck on "Launching dream world..." (or similar)
 
 **Should never happen.** Post-FIX_PLAN Phase A the client hard-timer at
 `NEXT_PUBLIC_MAX_GENERATION_MS` (default 75 000 ms) always navigates to `/play`,
@@ -194,6 +194,38 @@ Edge, Brave) — they have the best WebGL2 + WASM coverage.
 **Fix:** click anywhere inside the Canvas. Phase 8 of the 12-phase plan added
 an on-screen hint ("Click here to give canvas focus") for first-time users.
 
+### Mobile-touch hint appears on a desktop browser
+
+**Cause:** DevTools is emulating a touch device. Open the device-toolbar
+(`Ctrl/Cmd-Shift-M` in Chromium) and look for the "Touch" toggle in the top
+bar — toggle it off, or close device emulation entirely.
+
+**Why it triggers:** `DreamGame3D` shows the touch-controls hint when it
+detects `'ontouchstart' in window` OR `navigator.maxTouchPoints > 0`.
+DevTools' device emulator sets both. Real desktop browsers (no emulation) do
+not show the hint.
+
+### 3D asset GLB fails to load (CORS / 404)
+
+**Symptom:** The scene renders correctly with the procedural placeholder, but
+the per-dream `character.glb` / `prop.glb` / `portal.glb` never appears.
+DevTools → Network shows a 404 or a CORS-blocked response.
+
+**Expected fallback.** `DreamGame3D` uses `useGLTF` from `@react-three/drei`,
+which suspends the consuming component while the GLB is being loaded. When the
+network request fails, the parent Suspense boundary falls back to the
+procedural mesh and the game keeps playing. **The failure is non-fatal.**
+
+**Verify in DevTools:**
+
+1. Open Network tab → filter by `.glb`.
+2. The expected URL is `/generated3d/<generationId>/<asset>.glb`.
+3. A `404` means TRELLIS never produced the file (cold start, sleeping space,
+   per-request deadline exceeded). Look at the terminal output of `npm run dev`
+   for the corresponding `/api/generate-3d` response.
+4. A `CORS` error means you opened the page on a non-localhost origin. The
+   dev server only serves `/generated3d/...` from `http://localhost:3000`.
+
 ---
 
 ## Generated assets
@@ -222,13 +254,78 @@ fresh id.
 2. Hard-refresh.
 3. Confirm DevTools → Application → Storage shows no stale `generationId`.
 
-### Fire-and-forget assets do not dynamically appear in `/play`
+### Fire-and-forget assets do not dynamically appear in `/play` — **RESOLVED**
 
-**Gap:** If `generate-assets` (e.g., Stable Diffusion) takes longer than the `/loading-dream` redirect timer, the assets will eventually arrive and be written to `localStorage` (via the background `fetch`), but the already-mounted `/play` page will **not** automatically show them.
+**(RESOLVED)** This was a real limitation through Phases 1-12 and into the
+initial P0 audit. It is now fixed by the Phase P0 asset-pipeline rewrite.
 
-**Cause:** The `play/page.tsx` component reads `gameAssets` from `localStorage` once on mount. It does not set up a `storage` event listener to react to late-arriving updates.
+**Old problem:** `play/page.tsx` only read `gameAssets` from `localStorage`
+once on mount, so any asset response that landed *after* `/play` had mounted
+was effectively invisible until the user manually refreshed.
 
-**Workaround:** For production demos with a real SD backend, manually refresh the `/play` page if you suspect textures have finished generating, or implement a `storage` event listener in `play/page.tsx` to dynamically push the new assets into the `DreamGame3D` props.
+**Fix (current behaviour):**
+
+1. `/loading-dream` fires `/api/generate-3d` and `/api/generate-assets` as
+   genuine fire-and-forget requests — no `AbortSignal` is attached to the
+   navigation lifecycle, so the requests survive the route change to `/play`.
+2. When a response lands, the loading page writes the merged result into
+   `localStorage.gameAssets` and dispatches a `dreamAssetsUpdated`
+   `CustomEvent` on `window`.
+3. `play/page.tsx` registers **two** listeners on mount:
+   - `window.addEventListener('dreamAssetsUpdated', ...)` — same-tab updates.
+   - `window.addEventListener('storage', ...)` — cross-tab updates (e.g. if
+     you opened `/loading-dream` in one tab and `/play` in another).
+4. Both listeners push the new asset URLs into `DreamGame3D` as props, which
+   re-renders. `useGLTF` and `useTexture` suspend on the new URLs, show the
+   procedural placeholder while loading, then swap in the real asset.
+
+**Verify in DevTools:**
+
+1. Application → Storage → Local Storage → watch the `gameAssets` key. It
+   updates as each API response lands.
+2. Sources → set a breakpoint on the `dreamAssetsUpdated` listener in
+   `play/page.tsx` — it fires within one frame of the API response.
+3. Network tab → the new GLB / PNG requests are kicked off when the listener
+   pushes the new URLs into `DreamGame3D`. The canvas updates via Suspense
+   within one render.
+
+**No manual refresh required.** The previous "workaround" (refresh the page
+after assets arrive) is no longer necessary.
+
+---
+
+## E2E / Playwright issues
+
+### Playwright says "browser not installed" / "Executable doesn't exist"
+
+**Symptom:** `npm run test:e2e` fails with an error like
+`browserType.launch: Executable doesn't exist at .../chrome-linux/chrome`.
+
+**Cause:** Playwright was added as a dev-dependency but its browser binary
+(headless Chromium) was never downloaded.
+
+**Fix:** install the browser binary once per machine:
+
+```bash
+cd web
+npm run test:e2e:install
+```
+
+This runs `playwright install chromium --with-deps`. The `--with-deps` flag
+pulls system libraries on Linux; on macOS / Windows it is a no-op. After this
+completes, `npm run test:e2e` and `npm run check:full` will both work.
+
+### Playwright spec fails because the dev server is already running
+
+**Symptom:** `EADDRINUSE: address already in use 0.0.0.0:3000`.
+
+**Cause:** `playwright.config.ts` uses a `webServer` block that spawns
+`npm run dev` on port 3000. If you already have `npm run dev` running in
+another terminal, the test runner cannot start its own server.
+
+**Fix:** stop the standalone dev server (Ctrl-C), then re-run
+`npm run test:e2e`. Playwright will start the dev server itself, run the
+suite, and shut it down.
 
 ---
 
@@ -265,7 +362,9 @@ next run.
 | 3D scene errors | Browser Console (R3F prints rich messages on shader/geometry issues). |
 | Schema / parse issues | `web/lib/game-config-schema.ts` is the source of truth for accepted shapes. |
 | "Why did it fall back?" | Check the response body — `{ fallback: true, error, message }` is the contract. |
+| Asset arrived late, not visible | DevTools → LocalStorage `gameAssets`; check the `dreamAssetsUpdated` listener in `play/page.tsx`. |
 | Verification commands | `memory.md` § 6 (quick verification commands). |
+| Non-blocking warnings (`THREE.Clock`, `PCFSoftShadowMap`) | Expected — see README "Known non-blocking console warnings". |
 
 For anything not covered here, capture the exact error text + the terminal
 output of `npm run dev` and add it to `memory.md § 7` (the session log).
