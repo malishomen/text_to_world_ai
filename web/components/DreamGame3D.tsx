@@ -543,6 +543,8 @@ function hashString(s: string, salt = 0): number {
 type PlayerShape = 'icosahedron' | 'tetrahedron' | 'octahedron' | 'dodecahedron' | 'sphere';
 type PlatformDecoration = 'crystal' | 'mushroom' | 'neon' | 'spire' | 'orb';
 type EnemyShape = 'octahedron' | 'tetrahedron' | 'cone' | 'sphere';
+type TerrainType = 'none' | 'hills' | 'spikes' | 'grid' | 'cracks' | 'rolling';
+type ParticleType = 'sparkle' | 'snow' | 'sakura' | 'neon_rain' | 'embers' | 'cosmic_dust';
 
 interface MoodPreset {
   fogDensity: number;
@@ -557,6 +559,8 @@ interface MoodPreset {
   skyTopColor: string;
   skyBottomColor: string;
   groundColor: string | null;
+  terrainType: TerrainType;
+  particleType: ParticleType;
 }
 
 function moodPresetFor(mood: string | undefined): MoodPreset {
@@ -574,6 +578,8 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       skyTopColor: '#1a0008',
       skyBottomColor: '#080010',
       groundColor: '#15050a',
+      terrainType: 'spikes',
+      particleType: 'embers',
     };
   }
   if (mood === 'cozy_dream') {
@@ -590,6 +596,8 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       skyTopColor: '#f5b985',
       skyBottomColor: '#7d4a8a',
       groundColor: '#1a3a1a',
+      terrainType: 'rolling',
+      particleType: 'sakura',
     };
   }
   if (mood === 'cyber_dream') {
@@ -606,6 +614,8 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       skyTopColor: '#001a3a',
       skyBottomColor: '#06b6d4',
       groundColor: '#02041a',
+      terrainType: 'grid',
+      particleType: 'neon_rain',
     };
   }
   if (mood === 'cosmic') {
@@ -622,6 +632,8 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       skyTopColor: '#0a0033',
       skyBottomColor: '#020010',
       groundColor: null,
+      terrainType: 'none',
+      particleType: 'cosmic_dust',
     };
   }
   if (mood === 'dark_fantasy') {
@@ -638,6 +650,8 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       skyTopColor: '#15082a',
       skyBottomColor: '#080015',
       groundColor: '#1a0a1f',
+      terrainType: 'cracks',
+      particleType: 'embers',
     };
   }
   if (mood === 'ethereal') {
@@ -654,6 +668,8 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       skyTopColor: '#d1baf0',
       skyBottomColor: '#a085c5',
       groundColor: null,
+      terrainType: 'none',
+      particleType: 'snow',
     };
   }
   if (mood === 'whimsical') {
@@ -670,6 +686,8 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
       skyTopColor: '#ffd5b0',
       skyBottomColor: '#a07ad8',
       groundColor: '#2a1a3a',
+      terrainType: 'rolling',
+      particleType: 'sakura',
     };
   }
   // surreal_calm and default
@@ -686,6 +704,8 @@ function moodPresetFor(mood: string | undefined): MoodPreset {
     skyTopColor: '#2a0a55',
     skyBottomColor: '#0a0015',
     groundColor: '#1a0030',
+    terrainType: 'hills',
+    particleType: 'sparkle',
   };
 }
 
@@ -731,15 +751,247 @@ function SkyDome({ topColor, bottomColor }: { topColor: string; bottomColor: str
   );
 }
 
-// ─── Ground plane (faded by fog at distance, anchors the scene) ─────────────
-function GroundPlane({ color, levelDepth }: { color: string; levelDepth: number }) {
-  // Plane extends behind player and along the level path. Sits at y=-4,
-  // below death plane (-12) is still safe — visual only, no collider.
+// ─── Displaced ground — per-mood relief instead of a flat fill ──────────────
+// Visual-only mesh (no collider; the death plane at y=-12 still ends the run
+// if the player falls off the platforms). Sits low enough that the player
+// cannot interact with it; mood-driven displacement gives the floor character
+// instead of just a colored fill the user noticed felt sterile.
+function DisplacedGround({ color, levelDepth, terrain }: {
+  color: string;
+  levelDepth: number;
+  terrain: TerrainType;
+}) {
+  const geom = useMemo(() => {
+    const width = 220;
+    const depth = levelDepth + 100;
+    const wSeg = terrain === 'grid' ? 60 : 80;
+    const dSeg = terrain === 'grid' ? 60 : 80;
+    const g = new THREE.PlaneGeometry(width, depth, wSeg, dSeg);
+    const pos = g.attributes.position as THREE.BufferAttribute;
+    const seed = terrain.charCodeAt(0) * 7919;
+    const rng = makeRng(seed);
+    // We pre-bake a hash table of noise samples so the displacement is stable
+    // across re-renders (no Math.random in geometry construction).
+    const noise = (x: number, z: number): number => {
+      // Cheap value-noise — lattice cells sampled deterministically.
+      const ix = Math.floor(x * 0.2);
+      const iz = Math.floor(z * 0.2);
+      const fx = x * 0.2 - ix;
+      const fz = z * 0.2 - iz;
+      const sample = (a: number, b: number) =>
+        ((Math.sin(a * 12.9898 + b * 78.233 + seed) * 43758.5453) % 1 + 1) % 1;
+      const n00 = sample(ix, iz);
+      const n10 = sample(ix + 1, iz);
+      const n01 = sample(ix, iz + 1);
+      const n11 = sample(ix + 1, iz + 1);
+      // Smoothstep blend
+      const u = fx * fx * (3 - 2 * fx);
+      const v = fz * fz * (3 - 2 * fz);
+      return (
+        n00 * (1 - u) * (1 - v) +
+        n10 * u * (1 - v) +
+        n01 * (1 - u) * v +
+        n11 * u * v
+      );
+    };
+
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const z = pos.getY(i); // plane is XY before rotation; we treat Y as Z
+      let y = 0;
+      switch (terrain) {
+        case 'spikes': {
+          // High-frequency aggressive peaks — sharp jagged terrain.
+          const n = noise(x * 1.8, z * 1.8);
+          y = Math.pow(n, 3) * 6 - 0.5;
+          break;
+        }
+        case 'cracks': {
+          // Wide low-frequency undulation with occasional sharp drops.
+          const n = noise(x * 0.6, z * 0.6);
+          const c = noise(x * 0.15, z * 0.15);
+          y = n * 1.5 + (c < 0.25 ? -2 : 0);
+          break;
+        }
+        case 'grid': {
+          // Repeated tile cells with edges raised — neon-floor look.
+          const cellSize = 6;
+          const fx = (((x % cellSize) + cellSize) % cellSize) / cellSize;
+          const fz = (((z % cellSize) + cellSize) % cellSize) / cellSize;
+          const edge = Math.min(fx, 1 - fx, fz, 1 - fz);
+          y = edge < 0.05 ? 0.7 : 0;
+          break;
+        }
+        case 'hills': {
+          // Calm sine waves — surreal but anchored.
+          y = Math.sin(x * 0.2) * 0.9 + Math.cos(z * 0.18) * 0.7;
+          break;
+        }
+        case 'rolling': {
+          // Softer rolling hills — cozy / whimsical.
+          y =
+            Math.sin(x * 0.1) * 1.5 +
+            Math.cos(z * 0.13) * 1.2 +
+            noise(x * 0.4, z * 0.4) * 0.6;
+          break;
+        }
+        case 'none':
+        default: {
+          y = 0;
+          break;
+        }
+      }
+      // PlaneGeometry: original position is in (x, y, 0). Push z = y after
+      // rotation, but Three.js applies rotation to attribute, so set Z here
+      // (we'll rotate the mesh to lay flat).
+      pos.setZ(i, y);
+    }
+    // Suppress reference to rng so it isn't tree-shaken as dead — used inside noise().
+    void rng;
+    g.computeVertexNormals();
+    return g;
+  }, [terrain, levelDepth]);
+
+  // Cleanup the BufferGeometry on unmount/dep-change to avoid leaks.
+  useEffect(() => () => geom.dispose(), [geom]);
+
   return (
-    <mesh position={[0, -4, -levelDepth / 2]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-      <planeGeometry args={[200, levelDepth + 80]} />
-      <meshStandardMaterial color={color} roughness={0.9} metalness={0.0} />
+    <mesh
+      geometry={geom}
+      position={[0, -4, -levelDepth / 2]}
+      rotation={[-Math.PI / 2, 0, 0]}
+      receiveShadow
+    >
+      <meshStandardMaterial
+        color={color}
+        roughness={0.85}
+        metalness={terrain === 'grid' ? 0.6 : 0.0}
+        emissive={terrain === 'grid' ? color : '#000000'}
+        emissiveIntensity={terrain === 'grid' ? 0.15 : 0}
+        flatShading={terrain === 'spikes' || terrain === 'cracks'}
+      />
     </mesh>
+  );
+}
+
+// ─── Atmospheric particles — falling snow / sakura / neon rain / embers ────
+// All four use a single InstancedMesh with per-instance position state driven
+// by useFrame. Cheap (~200-400 instances) and visually substantial.
+function AtmosphericParticles({ kind, palette, levelDepth }: {
+  kind: ParticleType;
+  palette: string[];
+  levelDepth: number;
+}) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const COUNT =
+    kind === 'cosmic_dust' ? 500 :
+    kind === 'neon_rain' ? 250 :
+    kind === 'snow' ? 350 :
+    kind === 'sakura' ? 200 :
+    kind === 'embers' ? 150 :
+    0;
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const halfW = 70;
+  const halfD = levelDepth / 2 + 40;
+  const cz = -levelDepth / 2;
+
+  // Per-instance state: x/y/z position, speed, sway phase.
+  const state = useMemo(() => {
+    const arr = new Float32Array(COUNT * 5);
+    for (let i = 0; i < COUNT; i++) {
+      arr[i * 5 + 0] = (Math.random() - 0.5) * (halfW * 2);                // x
+      arr[i * 5 + 1] = Math.random() * 40 - 5;                              // y
+      arr[i * 5 + 2] = cz + (Math.random() - 0.5) * (halfD * 2);            // z
+      arr[i * 5 + 3] = 0.5 + Math.random() * 1.5;                           // speed
+      arr[i * 5 + 4] = Math.random() * Math.PI * 2;                         // phase
+    }
+    return arr;
+  }, [COUNT, halfW, halfD, cz]);
+
+  useFrame((_, delta) => {
+    const m = meshRef.current;
+    if (!m) return;
+    for (let i = 0; i < COUNT; i++) {
+      const base = i * 5;
+      const speedBase = state[base + 3];
+      let fallSpeed = 0;
+      let swayAmp = 0;
+      let rise = false;
+      switch (kind) {
+        case 'snow':        fallSpeed = 1.2 * speedBase; swayAmp = 0.6; break;
+        case 'sakura':      fallSpeed = 0.8 * speedBase; swayAmp = 1.4; break;
+        case 'neon_rain':   fallSpeed = 14  * speedBase; swayAmp = 0;   break;
+        case 'embers':      fallSpeed = -1.5 * speedBase; swayAmp = 0.8; rise = true; break;
+        case 'cosmic_dust': fallSpeed = 0.3 * speedBase; swayAmp = 0.4; break;
+        default: break;
+      }
+      state[base + 1] -= fallSpeed * delta;
+      state[base + 4] += delta * 1.2;
+      const swayX = Math.sin(state[base + 4]) * swayAmp * delta * 4;
+      state[base + 0] += swayX;
+      // Reset when below ground (or above sky for embers).
+      if (rise && state[base + 1] > 35) {
+        state[base + 0] = (Math.random() - 0.5) * (halfW * 2);
+        state[base + 1] = -4;
+        state[base + 2] = cz + (Math.random() - 0.5) * (halfD * 2);
+      } else if (!rise && state[base + 1] < -4) {
+        state[base + 0] = (Math.random() - 0.5) * (halfW * 2);
+        state[base + 1] = 32;
+        state[base + 2] = cz + (Math.random() - 0.5) * (halfD * 2);
+      }
+      dummy.position.set(state[base + 0], state[base + 1], state[base + 2]);
+      // Per-kind orientation
+      if (kind === 'neon_rain') {
+        dummy.scale.set(1, 6, 1);
+        dummy.rotation.set(0, 0, 0);
+      } else if (kind === 'sakura') {
+        dummy.scale.set(1, 1, 1);
+        dummy.rotation.set(state[base + 4], state[base + 4] * 0.7, 0);
+      } else {
+        dummy.scale.set(1, 1, 1);
+        dummy.rotation.set(0, 0, 0);
+      }
+      dummy.updateMatrix();
+      m.setMatrixAt(i, dummy.matrix);
+    }
+    m.instanceMatrix.needsUpdate = true;
+  });
+
+  if (COUNT === 0) return null;
+
+  const colorHex = (() => {
+    switch (kind) {
+      case 'snow':        return '#ffffff';
+      case 'sakura':      return '#ffc0cb';
+      case 'neon_rain':   return palette[0] || '#06b6d4';
+      case 'embers':      return palette[0] || '#ff5522';
+      case 'cosmic_dust': return palette[1] || '#a855f7';
+      default:            return '#ffffff';
+    }
+  })();
+  const sizePx =
+    kind === 'snow' ? 0.06 :
+    kind === 'sakura' ? 0.12 :
+    kind === 'neon_rain' ? 0.04 :
+    kind === 'embers' ? 0.08 :
+    /* cosmic_dust */ 0.05;
+
+  return (
+    <instancedMesh ref={meshRef} args={[undefined, undefined, COUNT]} frustumCulled={false}>
+      {kind === 'sakura' ? (
+        <planeGeometry args={[sizePx * 2, sizePx * 2]} />
+      ) : (
+        <sphereGeometry args={[sizePx, 6, 4]} />
+      )}
+      <meshStandardMaterial
+        color={colorHex}
+        emissive={colorHex}
+        emissiveIntensity={kind === 'neon_rain' || kind === 'embers' ? 4 : 1.2}
+        transparent
+        opacity={kind === 'cosmic_dust' ? 0.55 : 0.9}
+        side={kind === 'sakura' ? THREE.DoubleSide : THREE.FrontSide}
+      />
+    </instancedMesh>
   );
 }
 
@@ -932,15 +1184,25 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
 
       {/* Environment */}
       <Stars radius={120} depth={60} count={mp.starsCount} factor={5} fade speed={0.4} />
-      <Sparkles
-        count={mp.sparklesCount}
-        scale={[platforms.length * 5, 20, platforms.length * 7]}
-        position={[0, 6, -platforms.length * 3.5]}
-        size={2}
-        speed={0.15}
-        color={palette[0]}
-      />
-      {mp.groundColor && <GroundPlane color={mp.groundColor} levelDepth={levelDepth} />}
+      {mp.particleType === 'sparkle' ? (
+        <Sparkles
+          count={mp.sparklesCount}
+          scale={[platforms.length * 5, 20, platforms.length * 7]}
+          position={[0, 6, -platforms.length * 3.5]}
+          size={2}
+          speed={0.15}
+          color={palette[0]}
+        />
+      ) : (
+        <AtmosphericParticles kind={mp.particleType} palette={palette} levelDepth={levelDepth} />
+      )}
+      {mp.groundColor && (
+        <DisplacedGround
+          color={mp.groundColor}
+          levelDepth={levelDepth}
+          terrain={mp.terrainType}
+        />
+      )}
 
       {/* Floating narrative */}
       <Float speed={0.8} floatIntensity={0.3} rotationIntensity={0.05}>
