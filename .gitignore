@@ -27,9 +27,16 @@ venv/
 # --- Generated assets (runtime output, not source) ---
 web/public/generated/
 web/public/generated3d/
+web/public/generated-tts/
 web/public/dream_config.json
 godot/assets/*.glb
 godot/dream_config.json
+
+# Keep .gitkeep markers for the generated dirs themselves
+!web/public/generated-tts/.gitkeep
+
+# --- Tier S temp ---
+.agent-tier-s-contract.md
 
 # --- Godot ---
 .godot/

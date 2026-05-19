@@ -93,6 +93,34 @@ non-blocking — kept here for future iterations:
   are anagrams share scatter. Acceptable for hackathon; replace with a real
   string hash (FNV-1a / xxHash) if reused in user-visible ID generation.
 
+### 2.0.1. Tier S audit MEDIUM/LOW (logged 2026-05-19)
+Post-audit findings not requiring this-session fixes; tracked here:
+
+- **CinematicIntro strict-mode silent intro (MEDIUM)** — startedRef guard
+  skips 2nd mount of dev double-render, but the 1st mount's cleanup
+  cancels everything between the two mounts. In dev mode this can produce
+  a totally silent intro until user clicks "New Dream". Production
+  unaffected. Workaround if surfaces in demo: refresh /play once.
+- **AudioEngine.oneShotBufferCache unbounded (MEDIUM)** — caches decoded
+  AudioBuffers by URL forever. Multi-dream sessions grow memory. Bound to
+  LRU 8 or clear on setMood in a follow-up.
+- **/api/generate-narration sync fs (MEDIUM)** — uses fs.existsSync +
+  writeFileSync. Acceptable for demo, would block event loop under burst.
+- **showAudioToast not muted-aware (MEDIUM)** — if user clicks mute
+  during the 200 ms gap before toast appears, toast pops while muted.
+  Guard: `if (muted) return;` in the effect.
+- **CinematicIntro transitionend listener leak (MEDIUM)** — no
+  `{ once: true }`; can leak on detached node if unmount races. Cosmetic.
+- **'no-id' generationId fallback (LOW)** — fails isValidGenerationId,
+  returns 400, drops to Web Speech anyway. Log-noisy on corrupted
+  localStorage.
+- **pickEnglishFemaleVoice last-resort voices[0] (LOW)** — on Russian
+  locale, returns a Russian voice reading English. Strict en-* filter.
+- **AudioEngine setMuted ternary cosmetic (LOW)** — `g.setValueAtTime(this.muted ? 0 : 0, now)` both branches 0. Trivial cleanup.
+- **/audio/intro-pad.mp3 reference (LOW)** — CinematicIntro stinger
+  fallback path references a file that doesn't exist. .catch swallows
+  the 404. Either ship the asset or remove the branch.
+
 ### 2.1. lucide-react@^1.16.0 — suspicious version
 **Symptom:** version 1.x is unusual (mainline is 0.46x).
 **Cause:** unknown — may be a fork or a typo in package.json.
@@ -631,6 +659,151 @@ varied, flat-fill ground, no silhouettes between platforms and sky.
 - Per-mood platform base geometry (hex/disc/crystal vs box) — separate
   Tier 1.5.
 - Per-mood gravity / jumpImpulse / playerSpeed for different "feel".
+
+---
+
+### 2026-05-19: TRELLIS v1 → v2 (microsoft/TRELLIS.2) — PBR-materials backend swap
+**Request:** User pointed at https://github.com/microsoft/TRELLIS.2 — "проверь".
+Discovered the v2 model has a public HF Space (`microsoft/TRELLIS.2`) so the
+upgrade is a zero-infrastructure env change for our pipeline.
+
+**Findings:**
+- TRELLIS.2: 4B model, MIT license, image-to-3D with PBR materials (BaseColor +
+  Roughness + Metallic + Opacity). Native install needs Linux + CUDA 12.4 +
+  24GB VRAM — irrelevant when using the HF Space.
+- HF Space `microsoft/TRELLIS.2` exposes the SAME three Gradio endpoint
+  names we already call (`/preprocess_image`, `/image_to_3d`, `/extract_glb`),
+  plus optional `/start_session` / `/end_session` we can ignore.
+- But the signatures are DIFFERENT:
+  - `/image_to_3d` v1 took 7 named params (`ss_*`, `slat_*`, `seed`,
+    `randomize_seed`); v2 takes a 15-element POSITIONAL list driving 3
+    sub-stages (shape → PBR pass A → PBR pass B), plus a Resolution radio
+    `"512"|"1024"|"1536"`. v1's named-param form is rejected by v2 because
+    the Space has 4 sets of identically-labelled sliders ("Guidance
+    Strength" appears 3× across stages).
+  - `/extract_glb` v1 took `{mesh_simplify_ratio, texture_size}`; v2
+    requires `[state, decimation_target (int face count), texture_size]`.
+    Default decimation_target in the Space UI is 300000; we use 60000 to
+    keep GLBs lightweight for late-asset streaming.
+  - @gradio/client 2.2 accepts both positional arrays and named objects
+    (`predict(endpoint, data: unknown[] | Record<string, unknown>)`), so the
+    adapter just switches shape based on URL detection.
+- Inference on H100 per the README: 3s @ 512³ / 17s @ 1024³ / 60s @ 1536³.
+  HF Space uses free Zero GPU (much slower) plus cold-start; conservative
+  client timeout bumped to 120s for v2 (was 90s).
+
+**Changes:**
+- `web/app/api/generate-3d/route.ts`:
+  - `TRELLIS_URL` default flipped from `JeffreyXiang/TRELLIS-image-large` (v1)
+    to `microsoft/TRELLIS.2` (v2).
+  - Added `IS_TRELLIS_V2` constant — regex `/trellis\.?2/i` against
+    `TRELLIS_URL`.
+  - `trellisImageToGlb` now branches on `IS_TRELLIS_V2`:
+    - v2 `/image_to_3d`: positional 15-array, Resolution=512 (smallest, ~3s
+      shape on H100), seed pre-generated, 3-stage gs/gr/steps/rescaleT
+      defaults copied from the Space UI sliders.
+    - v2 `/extract_glb`: positional `[null, 60000, 1024]` (state, decimation
+      target, texture size). The `null` state arg relies on @gradio/client
+      auto-passing the prior call's session output.
+    - v1 path preserved as the else branch — no regression for callers that
+      explicitly set TRELLIS_URL back to v1.
+- `web/.env.local`: `TRELLIS_URL=microsoft/TRELLIS.2`, comment updated.
+- `docs/PROJECT_MAP.yaml`: env table, api endpoint description, and
+  architecture.runtime_processes entry all reflect v2 as default with v1
+  as fallback.
+
+**Verification so far:**
+- npx tsc --noEmit clean.
+- Gradio /config endpoint of `microsoft-trellis-2.hf.space` confirmed the
+  endpoint names and param positions used by the adapter.
+- Live smoke test pending (next step).
+
+**Tier 1.5 path opened:**
+With v2 producing real PBR-materials character GLBs, the existing Player
+fallback chain (TRELLIS GLB → LLaMA-Mesh OBJ → procedural mood-shape) will
+finally hit the top tier when assets land in time. Future work: wire v2's
+prop.glb as the `InstancedProps` source — judges would see judges-quality
+geometry scattered across terrain instead of the procedural primitives.
+
+---
+
+### 2026-05-19: Tier S — cinematic intro (narrator + ambient + stingers + presets), 5 parallel agents + post-audit
+**Request:** User asked for the "10/10 wow" version of Tier S. v1 plan
+self-audit had flagged 3 CRITICAL defects (procedural Web Audio tech-y,
+browser TTS robotic, four features but no choreography). v2 plan (committed
+at 0618ce1) rewrote around a cinematic timeline with real narrator (ElevenLabs
+free tier) + audit-driven fallback matrix.
+
+**Architecture decision (Phase 0):** real MP3 ambient loops abandoned —
+freepd.com is permanently closed (verified via WebFetch), incompetech tracks
+are 12-18 MB songs (too heavy, can't pre-trim without listening). Enhanced
+procedural Web Audio synthesis became the primary ambient path. Documented
+as Addendum 2026-05-19 inside docs/PLAN_TIER_S.md.
+
+**Phase 1 — five parallel sub-agents:**
+- Agent T (AudioEngine): 925 lines. 5-7 detuned oscillators per mood +
+  BiquadFilter + ConvolverNode synthetic IR + dual LFO. Master gain state
+  machine with duck-extend semantics. Separate oneShotBus added in audit
+  fix so mute reaches narrator/stingers.
+- Agent N (Narration API): 228 lines. ElevenLabs Turbo v2.5 + cache-first
+  + graceful no-tts fallback. Never 500. Path-traversal-safe.
+- Agent C (CinematicIntro): 425 lines. Full timeline T+0 → T+N+2.5.
+  Strict-mode guard, AbortController on fetch, voiceschanged race handled.
+- Agent S (Stingers): 379 lines. Three procedural one-shots, routed
+  through oneShotBus post-audit. Idempotent dispose.
+- Agent P (Demo Presets): 6 hand-tuned presets covering 6 moods. Module-
+  load self-validation (round-trip + isValidGenerationId).
+
+**Phase 1.5 — preset narration pre-generation:** posted 6 narratives to
+/api/generate-narration. **HONEST FAILURE:** first POST batch used hand-
+written narratives invented in PowerShell, not the ones Agent P committed
+to demo-presets.ts. Wasted 1176 ElevenLabs chars. Caught immediately,
+re-extracted the actual narratives, regenerated. Final spend 2469 chars
+out of 10000 free tier. Lesson: read source file before composing POST.
+
+**Phase 2 — integration:**
+- /play wires CinematicIntro (only when !introDone), captures engine via
+  onEngineReady, creates StingerEngine, disposes both on unmount, adds
+  mute button (Volume2/VolumeX), first-visit audio toast.
+- DreamGame3D gains onWinHook / onDeadHook — fired BEFORE setState so
+  stingers play in lock-step with the overlay.
+- Landing /page.tsx (Agent P): preset card grid added ABOVE the textarea.
+  exampleDreams kept (custom path still works).
+
+**Phase 3 — mandatory audit (CRITICAL=0, HIGH=5, all resolved):**
+- HIGH-1+2: playOneShot and stingers' master routed to ctx.destination
+  bypassing masterGain → mute button didn't silence narrator or stingers.
+  Fixed: new `oneShotBus: GainNode` in AudioEngine, allocated alongside
+  masterGain, exposed via `getOneShotBus()`. setMuted ramps BOTH buses.
+  Stingers route through `engine.getOneShotBus() ?? ctx.destination`.
+- HIGH-3: speechSynthesis can outlive a tab navigation (Chrome quirk).
+  Added pagehide + beforeunload listeners that cancel speech.
+- HIGH-4: /api/generate-narration had no client-side timeout — slow API
+  would leave typewriter ticking in silence. 8 s setManagedTimeout aborts
+  the controller; Web Speech fallback kicks in.
+- HIGH-5: /play's onEngineReady leaked StingerEngine on strict-mode
+  double-mount. Dispose prior engine before recreating.
+
+**Audit MEDIUM/LOW findings → memory.md § 2.X (logged below).**
+
+**Commits on `test` this session:**
+- 4d83717 docs(plan): Tier S v2 plan (cinematic choreography rewrite)
+- 0618ce1 (later) — actually that's the same; v2 plan landed
+- 3dbadd8 feat(tier-s): cinematic intro implementation
+- a2d6a3b fix(tier-s): audit HIGH findings — mute bus + pagehide + timeout
+
+**Current state:**
+- npx tsc --noEmit clean, npm run test 213/213 green.
+- Demo flow: click preset → /play instantly → black overlay → narrator
+  voice + typewriter sync + mood drone → fade-in to scene → playable
+  with WIN/LOSE stingers.
+- Custom flow: type → loading-dream (15-20 s LLM) → /play → same
+  cinematic intro, fresh ElevenLabs call (~1-3 s) or Web Speech.
+- Mute button silences EVERYTHING (ambient + narrator + stingers).
+- ElevenLabs spend: 2469 / 10000 chars this month.
+
+**Tier A still deferred:** FLUX via fal.ai for SD step, TRELLIS.2 PBR
+character GLB pipeline. Tier B too (camera shake, mobile touch, share-link).
 
 ---
 

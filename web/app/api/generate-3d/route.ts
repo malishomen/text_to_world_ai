@@ -20,13 +20,22 @@ import {
 } from '@/lib/game-config-schema';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-// TRELLIS_URL = HuggingFace Space ID  →  "JeffreyXiang/TRELLIS-image-large"
+// TRELLIS_URL = HuggingFace Space ID  →  "microsoft/TRELLIS.2" (v2, PBR-materials,
+//                                          512/1024/1536 resolution presets)
+//             = HuggingFace Space ID  →  "JeffreyXiang/TRELLIS-image-large" (v1)
 //             = local Gradio server   →  "http://127.0.0.1:7861"
-const TRELLIS_URL  = process.env.TRELLIS_URL  || 'JeffreyXiang/TRELLIS-image-large';
+const TRELLIS_URL  = process.env.TRELLIS_URL  || 'microsoft/TRELLIS.2';
 const SD_URL       = process.env.SD_BASE_URL  || 'http://127.0.0.1:7860';
 const HF_TOKEN     = process.env.HF_TOKEN     || '';
 
 const IS_HF_SPACE  = !TRELLIS_URL.startsWith('http');
+
+// v1 (JeffreyXiang/TRELLIS-image-large) and v2 (microsoft/TRELLIS.2) share the
+// same Gradio endpoint NAMES (/preprocess_image, /image_to_3d, /extract_glb)
+// but the v2 image_to_3d signature is a 15-element positional list driving a
+// 3-stage shape+PBR pipeline, and /extract_glb renamed `mesh_simplify_ratio`
+// to a `Decimation Target` integer. We auto-detect v2 by URL substring.
+const IS_TRELLIS_V2 = /trellis\.?2/i.test(TRELLIS_URL);
 
 const GODOT_DIR    = path.join(process.cwd(), '..', '..', 'godot', 'assets');
 
@@ -89,29 +98,60 @@ async function trellisImageToGlb(
     );
     const processedImage = (preprocessed.data as unknown[])[0];
 
-    // Step B: Image → 3D Gaussian Splatting + mesh
-    // (result not consumed — TRELLIS keeps session state for /extract_glb)
-    await withTimeout(
-      client.predict('/image_to_3d', {
-        image:                   processedImage,
-        seed:                    Math.floor(Math.random() * 65536),
-        randomize_seed:          true,
-        ss_guidance_strength:    7.5,   // Structure strength
-        ss_sampling_steps:       12,    // 12 = fast, 20 = quality
-        slat_guidance_strength:  3.0,   // Texture guidance
-        slat_sampling_steps:     12,
-      }),
-      IS_HF_SPACE ? 90000 : 60000,
-      'image_to_3d',
-    );
+    // Step B: Image → 3D shape (+ PBR materials in v2).
+    // v2 takes 15 positional args driving 3 sub-stages (shape -> PBR layer A
+    // -> PBR layer B). v1 takes the original 7-key named object. Defaults
+    // copied from the Space's UI sliders.
+    const seed = Math.floor(Math.random() * 65536);
+    if (IS_TRELLIS_V2) {
+      await withTimeout(
+        client.predict('/image_to_3d', [
+          processedImage,        // [ 0] Image Prompt
+          seed,                  // [ 1] Seed
+          '512',                 // [ 2] Resolution — "512"|"1024"|"1536".
+                                 //      512 = ~3s on H100; HF Space's free Zero
+                                 //      GPU runs slower so we pick smallest.
+          7.5,  0.7, 12, 5.0,    // [ 3-6 ] Stage 1: shape — gs / gr / steps / rescaleT
+          7.5,  0.5, 12, 3.0,    // [ 7-10] Stage 2: PBR pass A
+          1.0,  0.0, 12, 3.0,    // [11-14] Stage 3: PBR pass B
+        ]),
+        IS_HF_SPACE ? 120000 : 60000,
+        'image_to_3d',
+      );
+    } else {
+      await withTimeout(
+        client.predict('/image_to_3d', {
+          image:                   processedImage,
+          seed,
+          randomize_seed:          true,
+          ss_guidance_strength:    7.5,
+          ss_sampling_steps:       12,
+          slat_guidance_strength:  3.0,
+          slat_sampling_steps:     12,
+        }),
+        IS_HF_SPACE ? 90000 : 60000,
+        'image_to_3d',
+      );
+    }
 
-    // Step C: Extract GLB with texture baking
+    // Step C: Extract GLB with texture baking.
+    // v2 renamed `mesh_simplify_ratio` (0..1 float, "keep this fraction") to
+    // `Decimation Target` (integer face count target). v2 default 300000;
+    // we drop to 60000 so resulting GLBs stay light enough for late-asset
+    // streaming into the browser.
     const glbResult = await withTimeout(
-      client.predict('/extract_glb', {
-        mesh_simplify_ratio: 0.95,  // keep 95% of geometry
-        texture_size:        1024,  // 1024 for fast, 2048 for quality
-      }),
-      30000,
+      IS_TRELLIS_V2
+        ? client.predict('/extract_glb', [
+            null,    // [0] state — gradio_client passes the prior call's
+                     //     session output automatically when null
+            60000,   // [1] Decimation Target — face count
+            1024,    // [2] Texture Size
+          ])
+        : client.predict('/extract_glb', {
+            mesh_simplify_ratio: 0.95,
+            texture_size:        1024,
+          }),
+      45000,
       'extract_glb',
     );
 

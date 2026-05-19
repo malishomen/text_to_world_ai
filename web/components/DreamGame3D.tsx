@@ -178,9 +178,13 @@ interface PlayerProps {
   endedRef: React.MutableRefObject<boolean>;
   onDead: () => void;
   onWin: () => void;
+  /** Tier S movement SFX — all optional, ignored when omitted. */
+  onJump?: () => void;
+  onLand?: () => void;
+  onStep?: () => void;
 }
 
-function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin }: PlayerProps) {
+function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin, onJump, onLand, onStep }: PlayerProps) {
   const grounded = useRef(false);
   const canJump = useRef(true);
   const contacts = useRef(0);
@@ -189,6 +193,15 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, go
   const lightRef = useRef<THREE.PointLight>(null);
   // Cached scratch vector — eliminates `new THREE.Vector3` allocation per frame.
   const playerVec = useRef(new THREE.Vector3());
+  // Tier S SFX bookkeeping (timing only — actual audio fires via hooks).
+  const airborneStartedAt = useRef<number | null>(null);  // timestamp of last jump
+  const stepAccum = useRef(0);                              // seconds since last step
+  // Step cadence ~340 ms = 2.9 steps / second at jogging pace.
+  const STEP_INTERVAL_SEC = 0.34;
+  // Minimum airborne duration before landing fires a SFX (suppresses
+  // jitter from bouncing off platform edges).
+  const MIN_AIRBORNE_SEC = 0.08;
+  const MIN_MOVE_SPEED = 1.5;                                // |linvel xz| ≥ this to count as moving
 
   useFrame((_, delta) => {
     if (!bodyRef.current || endedRef.current) return;
@@ -211,7 +224,36 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, go
       bodyRef.current.applyImpulse({ x: 0, y: 16, z: 0 }, true);
       grounded.current = false;
       canJump.current = false;
+      // Tier S: mark airborne start + fire jump SFX.
+      airborneStartedAt.current = performance.now();
+      stepAccum.current = 0;                       // reset cadence
+      onJump?.();
       setTimeout(() => { canJump.current = true; }, 250);
+    }
+
+    // Tier S: footstep cadence — fire onStep every STEP_INTERVAL_SEC while
+    // grounded AND horizontally moving above MIN_MOVE_SPEED.
+    const horizSpeed = Math.hypot(vel.x, vel.z);
+    if (grounded.current && horizSpeed > MIN_MOVE_SPEED) {
+      stepAccum.current += delta;
+      if (stepAccum.current >= STEP_INTERVAL_SEC) {
+        stepAccum.current -= STEP_INTERVAL_SEC;
+        onStep?.();
+      }
+    } else if (!grounded.current) {
+      // Reset the cadence accumulator while airborne so the first step
+      // after landing is fresh.
+      stepAccum.current = 0;
+    }
+
+    // Tier S: landing detection — airborneStartedAt is set on jump and
+    // cleared the first frame we re-touch the ground (grounded.current
+    // is set true by onCollisionEnter on the RigidBody below). If we were
+    // airborne long enough, fire onLand.
+    if (grounded.current && airborneStartedAt.current !== null) {
+      const airSec = (performance.now() - airborneStartedAt.current) / 1000;
+      airborneStartedAt.current = null;
+      if (airSec >= MIN_AIRBORNE_SEC) onLand?.();
     }
 
     // Mesh bob (works for both procedural ball and GLB group)
@@ -1092,13 +1134,16 @@ function generateLevel(config: GameConfig, palette: string[], seedStr: string) {
 }
 
 // ─── Main scene ──────────────────────────────────────────────────────────────
-function DreamScene({ config, generationId, assets, restartToken, onWin, onDead }: {
+function DreamScene({ config, generationId, assets, restartToken, onWin, onDead, onJump, onLand, onStep }: {
   config: GameConfig;
   generationId?: string;
   assets?: GameAssets;
   restartToken: number;
   onWin: () => void;
   onDead: () => void;
+  onJump?: () => void;
+  onLand?: () => void;
+  onStep?: () => void;
 }) {
   const playerRef = useRef<RapierRigidBody>(null);
   const keys = useKeys();
@@ -1304,6 +1349,9 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
           endedRef={endedRef}
           onDead={onDead}
           onWin={onWin}
+          onJump={onJump}
+          onLand={onLand}
+          onStep={onStep}
         />
 
         {/* Platforms */}
@@ -1346,10 +1394,27 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
 }
 
 // ─── Exported component ───────────────────────────────────────────────────────
-export default function DreamGame3D({ config, generationId, assets }: {
+export default function DreamGame3D({
+  config,
+  generationId,
+  assets,
+  onWinHook,
+  onDeadHook,
+  onJumpHook,
+  onLandHook,
+  onStepHook,
+}: {
   config: GameConfig;
   generationId?: string;
   assets?: GameAssets;
+  /** Optional side-effect fired before setState('won') — wire stinger SFX here. */
+  onWinHook?: () => void;
+  /** Optional side-effect fired before setState('dead') — wire stinger SFX here. */
+  onDeadHook?: () => void;
+  /** Tier S: optional SFX hooks fired by the physics player. */
+  onJumpHook?: () => void;
+  onLandHook?: () => void;
+  onStepHook?: () => void;
 }) {
   const [state, setState] = useState<'playing' | 'won' | 'dead'>('playing');
   const [restartToken, setRestartToken] = useState(0);
@@ -1421,8 +1486,11 @@ export default function DreamGame3D({ config, generationId, assets }: {
           generationId={generationId}
           assets={assets}
           restartToken={restartToken}
-          onWin={() => setState('won')}
-          onDead={() => setState('dead')}
+          onWin={() => { onWinHook?.(); setState('won'); }}
+          onDead={() => { onDeadHook?.(); setState('dead'); }}
+          onJump={onJumpHook}
+          onLand={onLandHook}
+          onStep={onStepHook}
         />
         {/* Bloom postprocessing — intercepts the render after the scene tree. */}
         <PostFX />

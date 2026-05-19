@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import dynamic from 'next/dynamic';
-import { RotateCcw, Download, Moon, X } from 'lucide-react';
+import { RotateCcw, Download, Moon, X, Volume2, VolumeX } from 'lucide-react';
 import type { GameConfig } from '@/components/DreamGame3D';
 import { parseGameConfig } from '@/lib/game-config-schema';
 import { isValidGenerationId } from '@/lib/generation-id';
@@ -13,9 +13,12 @@ import {
   DREAM_ASSETS_UPDATED_EVENT,
   isGameAssets,
 } from '@/lib/game-assets';
+import type { AudioEngine } from '@/lib/audio/AudioEngine';
+import { createStingers, type StingerEngine } from '@/lib/audio/stingers';
 
 // Three.js / Rapier must load client-side only — no SSR
 const DreamGame3D = dynamic(() => import('@/components/DreamGame3D'), { ssr: false });
+const CinematicIntro = dynamic(() => import('@/components/CinematicIntro'), { ssr: false });
 
 export default function PlayPage() {
   const [config, setConfig] = useState<GameConfig | null>(null);
@@ -24,6 +27,11 @@ export default function PlayPage() {
   const [assets, setAssets] = useState<GameAssets>(NO_ASSETS);
   const [loading, setLoading] = useState(true);
   const [exportOpen, setExportOpen] = useState(false);
+  const [introDone, setIntroDone] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [showAudioToast, setShowAudioToast] = useState(false);
+  const audioEngineRef = useRef<AudioEngine | null>(null);
+  const stingerEngineRef = useRef<StingerEngine | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -109,6 +117,40 @@ export default function PlayPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [exportOpen]);
 
+  // Audio: dispose engine + stingers on /play unmount. The engine is
+  // constructed by CinematicIntro; we just take ownership of teardown.
+  useEffect(() => {
+    return () => {
+      stingerEngineRef.current?.dispose();
+      audioEngineRef.current?.dispose().catch(() => {});
+      stingerEngineRef.current = null;
+      audioEngineRef.current = null;
+    };
+  }, []);
+
+  // Sync muted UI state with persisted localStorage (set by CinematicIntro
+  // before it constructs the engine). Initialise once on mount.
+  useEffect(() => {
+    setMuted(localStorage.getItem('audioMuted') === '1');
+  }, []);
+
+  // First-visit audio toast: show after intro completes, once per session.
+  useEffect(() => {
+    if (!introDone) return;
+    if (localStorage.getItem('audioToastShown') === '1') return;
+    localStorage.setItem('audioToastShown', '1');
+    const t1 = setTimeout(() => setShowAudioToast(true), 200);
+    const t2 = setTimeout(() => setShowAudioToast(false), 4500);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [introDone]);
+
+  const handleMuteToggle = () => {
+    const next = !muted;
+    setMuted(next);
+    audioEngineRef.current?.setMuted(next);
+    // setMuted on the engine persists to localStorage already.
+  };
+
   const handleNewDream = () => {
     localStorage.removeItem('gameConfig');
     localStorage.removeItem('gameAssets');
@@ -144,6 +186,12 @@ export default function PlayPage() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
+          <button onClick={handleMuteToggle}
+            aria-label={muted ? 'Unmute audio' : 'Mute audio'}
+            title={muted ? 'Unmute audio' : 'Mute audio'}
+            className="flex items-center justify-center p-2 rounded-xl bg-purple-900/30 border border-purple-700/30 text-purple-300 hover:bg-purple-800/40 transition-all">
+            {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+          </button>
           <button onClick={handleNewDream}
             aria-label="New Dream"
             className="flex items-center gap-2 px-3 sm:px-4 py-2 rounded-xl bg-purple-900/30 border border-purple-700/30 text-purple-300 hover:bg-purple-800/40 transition-all text-sm">
@@ -159,10 +207,48 @@ export default function PlayPage() {
         </div>
       </header>
 
+      {/* Cinematic intro overlay — full-screen black + narrator + typewriter,
+          fades into the scene. AudioEngine constructed inside; we capture it
+          via onEngineReady so we can dispose on unmount + drive stingers. */}
+      {!introDone && (
+        <CinematicIntro
+          narrative={config.narrative || 'A dream unfolds.'}
+          mood={config.mood || 'surreal_calm'}
+          generationId={generationId ?? 'no-id'}
+          onComplete={() => setIntroDone(true)}
+          onEngineReady={(engine) => {
+            // Strict-mode double-mount safety: dispose any prior audio +
+            // stinger engines before swapping in the new one. CinematicIntro's
+            // 2nd mount creates a fresh AudioEngine; without this dispose
+            // the first engine's oscillators + LFO timers leak.
+            stingerEngineRef.current?.dispose();
+            audioEngineRef.current?.dispose().catch(() => {});
+            audioEngineRef.current = engine;
+            stingerEngineRef.current = createStingers(engine);
+          }}
+        />
+      )}
+
+      {/* First-visit audio toast */}
+      {showAudioToast && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-full bg-purple-900/85 backdrop-blur border border-purple-500/40 text-purple-100 text-xs shadow-lg shadow-purple-900/40 animate-pulse">
+          🔊 Mood audio is playing — click the speaker icon to mute
+        </div>
+      )}
+
       <div className="flex flex-col md:flex-row flex-1 overflow-hidden">
         {/* 3D Game */}
         <div className="flex-1 relative min-h-0">
-          <DreamGame3D config={config} generationId={generationId} assets={assets} />
+          <DreamGame3D
+            config={config}
+            generationId={generationId}
+            assets={assets}
+            onWinHook={() => { stingerEngineRef.current?.playWin().catch(() => {}); }}
+            onDeadHook={() => { stingerEngineRef.current?.playLose().catch(() => {}); }}
+            onJumpHook={() => { stingerEngineRef.current?.playJump().catch(() => {}); }}
+            onLandHook={() => { stingerEngineRef.current?.playLand().catch(() => {}); }}
+            onStepHook={() => { stingerEngineRef.current?.playStep().catch(() => {}); }}
+          />
         </div>
 
         {/* Sidebar — right rail on desktop, collapsible bottom panel on mobile */}
