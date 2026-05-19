@@ -25,7 +25,15 @@ const MESH_MAX_TOKENS = 3000;
 const SYSTEM_PROMPT = `You are LLaMA-Mesh, a 3D mesh generator.
 Output ONLY OBJ format: lines starting with "v" (vertex: v x y z) and "f" (face: f i j k).
 No explanation. No markdown. No commentary. No <think> tags. Just OBJ lines.
-Keep the mesh low-poly: 30-150 vertices, 60-300 faces.`;
+
+Match the requested aesthetic in the topology choices you make:
+- sharp / nightmare / cyber → angular, faceted, hard edges, fewer smooth surfaces
+- cozy / whimsical → round, soft silhouettes, gentle curves
+- ethereal / cosmic → crystalline, symmetric, geometric
+- dark_fantasy → elongated, asymmetric, heavy bases
+The character should be recognisable from its silhouette. Center it near
+the origin and keep the bounding box roughly cubic.
+Keep the mesh low-poly: 50-150 vertices, 80-300 faces.`;
 
 interface LLMChatResponse {
   choices?: Array<{ message?: { content?: string } }>;
@@ -60,11 +68,24 @@ export async function POST(req: NextRequest) {
     return badRequest('Invalid body');
   }
 
-  const b = body as { description?: unknown; generationId?: unknown };
+  const b = body as {
+    description?: unknown;
+    generationId?: unknown;
+    mood?: unknown;
+    style?: unknown;
+  };
   const description =
     typeof b.description === 'string' && b.description.trim().length > 0
       ? b.description.trim().slice(0, 300)
       : 'a magical floating crystal';
+  const mood =
+    typeof b.mood === 'string' && b.mood.trim().length > 0
+      ? b.mood.trim().slice(0, 40)
+      : '';
+  const style =
+    typeof b.style === 'string' && b.style.trim().length > 0
+      ? b.style.trim().slice(0, 40)
+      : '';
 
   const generationId = normalizeGenerationId(b.generationId) ?? newGenerationId();
   const filename = 'character.obj';
@@ -82,7 +103,11 @@ export async function POST(req: NextRequest) {
           { role: 'system', content: SYSTEM_PROMPT },
           {
             role: 'user',
-            content: `Create a 3D OBJ mesh of: ${description}. Low-poly. OBJ only.`,
+            content:
+              `Create a 3D OBJ mesh of: ${description}.` +
+              (mood ? ` Mood: ${mood}.` : '') +
+              (style ? ` Style: ${style}.` : '') +
+              ` Low-poly. Center near origin. OBJ only.`,
           },
         ],
         temperature: 0.7,

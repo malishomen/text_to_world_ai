@@ -332,7 +332,12 @@ function runPipeline(deps: PipelineDeps): void {
       fetch('/api/generate-mesh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description: charDesc, generationId }),
+        body: JSON.stringify({
+          description: charDesc,
+          mood: config.mood,
+          style: config.style,
+          generationId,
+        }),
       }).then((r) => r.json() as Promise<unknown>),
     ])
       .then((results) => {
