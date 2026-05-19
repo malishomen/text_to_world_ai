@@ -245,6 +245,9 @@ export default function PlayPage() {
             assets={assets}
             onWinHook={() => { stingerEngineRef.current?.playWin().catch(() => {}); }}
             onDeadHook={() => { stingerEngineRef.current?.playLose().catch(() => {}); }}
+            onJumpHook={() => { stingerEngineRef.current?.playJump().catch(() => {}); }}
+            onLandHook={() => { stingerEngineRef.current?.playLand().catch(() => {}); }}
+            onStepHook={() => { stingerEngineRef.current?.playStep().catch(() => {}); }}
           />
         </div>
 

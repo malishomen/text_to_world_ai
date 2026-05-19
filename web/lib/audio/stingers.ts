@@ -19,6 +19,15 @@ export interface StingerEngine {
   playWorldOpen(): Promise<void>;
   playWin(): Promise<void>;
   playLose(): Promise<void>;
+  /** Short rising-pitch whoosh fired the instant the player presses Space. */
+  playJump(): Promise<void>;
+  /** Low thud fired the moment the player's collider re-touches ground after
+   *  airborne flight. Suppressed if the airborne duration was < 80 ms (bounce
+   *  jitter on platform edges). */
+  playLand(): Promise<void>;
+  /** Quiet click fired on each footstep cadence tick. Caller is responsible
+   *  for spacing these (e.g. every ~350 ms while moving on ground). */
+  playStep(): Promise<void>;
   dispose(): void;
 }
 
@@ -362,6 +371,142 @@ export function createStingers(engine: AudioEngine): StingerEngine {
   }
 
   // -------------------------------------------------------------------------
+  // playJump — short rising whoosh, ~120 ms. Triangle osc 280 → 640 Hz with
+  // a fast attack + exponential decay. Subtle, plays often, must not annoy.
+  // -------------------------------------------------------------------------
+  async function playJump(): Promise<void> {
+    const ctx = ctxOrNull();
+    if (!ctx) return;
+
+    const t0 = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.value = 0.5;
+    master.connect(sink(ctx));
+
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(280, t0);
+    osc.frequency.exponentialRampToValueAtTime(640, t0 + 0.10);
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, t0);
+    env.gain.linearRampToValueAtTime(0.65, t0 + 0.02);
+    env.gain.exponentialRampToValueAtTime(0.001, t0 + 0.14);
+
+    osc.connect(env).connect(master);
+    osc.start(t0);
+    osc.stop(t0 + 0.16);
+    state.activeOscillators.push(osc);
+
+    // Cheap and frequent — do NOT duck the ambient on jumps.
+    const teardown = window.setTimeout(() => {
+      try { master.disconnect(); } catch { /* noop */ }
+      const i = state.activeTimers.indexOf(teardown);
+      if (i !== -1) state.activeTimers.splice(i, 1);
+    }, 250);
+    state.activeTimers.push(teardown);
+
+    await scheduleResolve(state, 160, [osc]);
+  }
+
+  // -------------------------------------------------------------------------
+  // playLand — low thud, ~90 ms. Filtered noise burst + 80 Hz sine click.
+  // No ducking; called once per landing.
+  // -------------------------------------------------------------------------
+  async function playLand(): Promise<void> {
+    const ctx = ctxOrNull();
+    if (!ctx) return;
+
+    const t0 = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.value = 0.55;
+    master.connect(sink(ctx));
+
+    // Sub-thud sine click
+    const sub = ctx.createOscillator();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(80, t0);
+    sub.frequency.exponentialRampToValueAtTime(45, t0 + 0.09);
+    const subEnv = ctx.createGain();
+    subEnv.gain.setValueAtTime(0, t0);
+    subEnv.gain.linearRampToValueAtTime(0.7, t0 + 0.01);
+    subEnv.gain.exponentialRampToValueAtTime(0.001, t0 + 0.10);
+    sub.connect(subEnv).connect(master);
+    sub.start(t0);
+    sub.stop(t0 + 0.12);
+    state.activeOscillators.push(sub);
+
+    // Short filtered noise for texture
+    const noiseBuf = buildWhiteNoiseBuffer(ctx, 0.06);
+    const noiseSrc = ctx.createBufferSource();
+    noiseSrc.buffer = noiseBuf;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(800, t0);
+    const noiseEnv = ctx.createGain();
+    noiseEnv.gain.setValueAtTime(0.35, t0);
+    noiseEnv.gain.exponentialRampToValueAtTime(0.001, t0 + 0.07);
+    noiseSrc.connect(lp).connect(noiseEnv).connect(master);
+    noiseSrc.start(t0);
+
+    const teardown = window.setTimeout(() => {
+      try { master.disconnect(); } catch { /* noop */ }
+      const i = state.activeTimers.indexOf(teardown);
+      if (i !== -1) state.activeTimers.splice(i, 1);
+    }, 250);
+    state.activeTimers.push(teardown);
+
+    await scheduleResolve(state, 120, [sub]);
+  }
+
+  // -------------------------------------------------------------------------
+  // playStep — very quiet footstep click, ~40 ms. Pitch + filter slightly
+  // randomised so successive steps don't sound copy-pasted. Master gain
+  // 0.18 because this fires every ~350 ms while moving.
+  // -------------------------------------------------------------------------
+  async function playStep(): Promise<void> {
+    const ctx = ctxOrNull();
+    if (!ctx) return;
+
+    const t0 = ctx.currentTime;
+    const master = ctx.createGain();
+    master.gain.value = 0.18;
+    master.connect(sink(ctx));
+
+    // Per-step variation: pitch ±15%, filter cutoff ±400 Hz.
+    const basePitch = 180 + (Math.random() - 0.5) * 50;
+    const filterCutoff = 1600 + (Math.random() - 0.5) * 800;
+
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(basePitch, t0);
+    osc.frequency.exponentialRampToValueAtTime(basePitch * 0.6, t0 + 0.04);
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, t0);
+    env.gain.linearRampToValueAtTime(0.5, t0 + 0.005);
+    env.gain.exponentialRampToValueAtTime(0.001, t0 + 0.05);
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.setValueAtTime(filterCutoff, t0);
+
+    osc.connect(env).connect(lp).connect(master);
+    osc.start(t0);
+    osc.stop(t0 + 0.06);
+    state.activeOscillators.push(osc);
+
+    const teardown = window.setTimeout(() => {
+      try { master.disconnect(); } catch { /* noop */ }
+      const i = state.activeTimers.indexOf(teardown);
+      if (i !== -1) state.activeTimers.splice(i, 1);
+    }, 100);
+    state.activeTimers.push(teardown);
+
+    await scheduleResolve(state, 60, [osc]);
+  }
+
+  // -------------------------------------------------------------------------
   // dispose — stop everything; safe to call twice.
   // -------------------------------------------------------------------------
   function dispose(): void {
@@ -380,6 +525,9 @@ export function createStingers(engine: AudioEngine): StingerEngine {
     playWorldOpen,
     playWin,
     playLose,
+    playJump,
+    playLand,
+    playStep,
     dispose,
   };
 }
