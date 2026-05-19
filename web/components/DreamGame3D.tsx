@@ -73,7 +73,10 @@ function FollowCamera({
   fxRef,
 }: {
   target: React.RefObject<RapierRigidBody | null>;
-  fxRef: React.RefObject<SceneFxState>;
+  // Optional + null-guarded inside useFrame. During HMR or first-frame mount
+  // races the parent's useRef value may briefly be unavailable; we fall back
+  // to baseline lerp behaviour instead of throwing.
+  fxRef?: React.RefObject<SceneFxState> | null;
 }) {
   const { camera } = useThree();
   const camPos = useRef(new THREE.Vector3(0, 12, 18));
@@ -86,16 +89,16 @@ function FollowCamera({
     if (!target.current) return;
     const t = target.current.translation();
     desired.current.set(t.x, t.y + 9, t.z + 16);
-    const fx = fxRef.current;
+    const fx = fxRef?.current ?? null;
     const now = performance.now();
     // Slow-mo: reduce lerp damping so the camera lazes after the player.
-    const isSlowMo = fx.slowMoUntilMs > now;
+    const isSlowMo = fx ? fx.slowMoUntilMs > now : false;
     const posLerp = isSlowMo ? 0.025 : 0.07;
     const lookLerp = isSlowMo ? 0.04  : 0.10;
     camPos.current.lerp(desired.current, posLerp);
     camera.position.copy(camPos.current);
     // Shake: ease-out (1-t)^2 decay around current cam position.
-    if (fx.shake) {
+    if (fx?.shake) {
       const elapsed = now - fx.shake.startMs;
       if (elapsed < fx.shake.durationMs) {
         const r = 1 - elapsed / fx.shake.durationMs;

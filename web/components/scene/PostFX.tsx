@@ -1,7 +1,7 @@
 'use client';
 
 import { EffectComposer, Bloom } from '@react-three/postprocessing';
-import type { ReactElement } from 'react';
+import { useEffect, useState, Component, type ReactElement, type ReactNode } from 'react';
 
 /**
  * Strictly-typed subset of {@link import('postprocessing').BloomEffect} options
@@ -32,6 +32,22 @@ const BLOOM: BloomOptions = {
   radius: 0.85,
 };
 
+// ── Boundary: silently disable PostFX if Bloom internals throw ───────────────
+// @react-three/postprocessing v3 + R3F v9 has a race where Bloom reads the
+// renderer's clear color before it's been populated (`null.alpha`). Catching
+// the error in a tiny boundary keeps the scene rendering with no Bloom rather
+// than blanking the canvas.
+class BloomBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidCatch(err: Error) {
+    if (typeof console !== 'undefined') {
+      console.warn('[PostFX] Bloom disabled (init race):', err.message);
+    }
+  }
+  render() { return this.state.hasError ? null : this.props.children; }
+}
+
 /**
  * Cinematic bloom postprocessing pass for the DreamCraft R3F scene.
  *
@@ -46,16 +62,27 @@ const BLOOM: BloomOptions = {
  * - `mipmapBlur` (true): cheap, soft, "filmic" blur — keep on.
  * - `radius` (0.85): wider halo when raised; only effective with mipmapBlur.
  */
-export default function PostFX(): ReactElement {
+export default function PostFX(): ReactElement | null {
+  // Defer mount by one tick so the renderer's clear color is committed before
+  // EffectComposer reads it. Fixes `Cannot read properties of null (reading 'alpha')`.
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setReady(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+  if (!ready) return null;
+
   return (
-    <EffectComposer>
-      <Bloom
-        intensity={BLOOM.intensity}
-        luminanceThreshold={BLOOM.luminanceThreshold}
-        luminanceSmoothing={BLOOM.luminanceSmoothing}
-        mipmapBlur={BLOOM.mipmapBlur}
-        radius={BLOOM.radius}
-      />
-    </EffectComposer>
+    <BloomBoundary>
+      <EffectComposer>
+        <Bloom
+          intensity={BLOOM.intensity}
+          luminanceThreshold={BLOOM.luminanceThreshold}
+          luminanceSmoothing={BLOOM.luminanceSmoothing}
+          mipmapBlur={BLOOM.mipmapBlur}
+          radius={BLOOM.radius}
+        />
+      </EffectComposer>
+    </BloomBoundary>
   );
 }
