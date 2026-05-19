@@ -1,24 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
 import * as fs from 'fs';
-import * as path from 'path';
+
+import {
+  normalizeGenerationId,
+  newGenerationId,
+} from '@/lib/generation-id';
+
+import {
+  buildAssetFsPath,
+  buildAssetUrl,
+  ensureAssetDir,
+} from '@/lib/generated-paths';
+
+import { badRequest, fallbackOk, logApiError } from '@/lib/api-errors';
+import { type GameConfig } from '@/lib/fallback-config';
+import { parseGameConfig } from '@/lib/game-config-schema';
 
 const SD_BASE_URL = process.env.SD_BASE_URL || 'http://127.0.0.1:7860';
-const ASSETS_DIR = path.join(process.cwd(), 'public', 'generated');
 
-interface GameConfig {
-  style: string;
-  mood: string;
-  main_character: { description: string; color: string };
-  background: { sky_color: string; ground_color: string };
-  color_palette: string[];
-}
+type AssetFilename = 'background.png' | 'character.png' | 'platform.png';
 
-// Ensure public/generated dir exists
-function ensureDir() {
-  if (!fs.existsSync(ASSETS_DIR)) fs.mkdirSync(ASSETS_DIR, { recursive: true });
-}
-
-async function generateImage(prompt: string, negative: string, filename: string): Promise<string | null> {
+async function generateImage(
+  prompt: string,
+  negative: string,
+  filename: AssetFilename,
+  generationId: string,
+): Promise<string | null> {
   try {
     const res = await fetch(`${SD_BASE_URL}/sdapi/v1/txt2img`, {
       method: 'POST',
@@ -36,15 +43,21 @@ async function generateImage(prompt: string, negative: string, filename: string)
     });
 
     if (!res.ok) return null;
-    const data = await res.json();
+    const data: { images?: string[] } = await res.json();
     const base64 = data.images?.[0];
     if (!base64) return null;
 
-    ensureDir();
-    const filePath = path.join(ASSETS_DIR, filename);
+    const filePath = buildAssetFsPath({
+      cwd: process.cwd(),
+      kind: '2d',
+      generationId,
+      filename,
+    });
     fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
-    return `/generated/${filename}`;
-  } catch {
+
+    return buildAssetUrl({ kind: '2d', generationId, filename });
+  } catch (err) {
+    logApiError('generate-assets/sd', err);
     return null;
   }
 }
@@ -68,58 +81,118 @@ function buildPrompts(config: GameConfig) {
     background: {
       prompt: `${styleKeywords}, game background, 2D platformer landscape, no characters, ${config.mood?.replace(/_/g, ' ')} atmosphere, sky and ground`,
       negative: negPrompt,
-      filename: 'background.png',
+      filename: 'background.png' as const,
     },
     character: {
       prompt: `${styleKeywords}, 2D game character sprite, ${config.main_character?.description || 'dream wanderer'}, full body, transparent background, game art`,
       negative: negPrompt + ', background scenery',
-      filename: 'character.png',
+      filename: 'character.png' as const,
     },
     platform: {
       prompt: `${styleKeywords}, game platform tile, ${config.style} style, simple rectangular shape, ${config.color_palette?.[1] || '#7c3aed'} color`,
       negative: negPrompt,
-      filename: 'platform.png',
+      filename: 'platform.png' as const,
     },
   };
 }
 
 export async function POST(req: NextRequest) {
-  const { config } = await req.json();
-  if (!config) return NextResponse.json({ error: 'No config' }, { status: 400 });
+  // ---- Phase 5: parse + shallow-validate the body --------------------------
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return badRequest('Invalid JSON body');
+  }
 
-  // Cheap probe so we don't waste 3×25 s timeouts when SD isn't even running.
-  const sdOk = await fetch(`${SD_BASE_URL}/sdapi/v1/options`,
-    { signal: AbortSignal.timeout(2000) }).then(r => r.ok).catch(() => false);
+  if (typeof body !== 'object' || body === null) {
+    return badRequest('Invalid JSON body');
+  }
+
+  const bodyObj = body as { config?: unknown; generationId?: unknown };
+
+  if (
+    typeof bodyObj.config !== 'object' ||
+    bodyObj.config === null ||
+    Array.isArray(bodyObj.config)
+  ) {
+    return badRequest('Field "config" is required', { field: 'config' });
+  }
+
+  // ---- Phase 3: resolve generationId ---------------------------------------
+  let generationId: string;
+  if (typeof bodyObj.generationId === 'string') {
+    const normalized = normalizeGenerationId(bodyObj.generationId);
+    if (!normalized) {
+      return badRequest('Invalid generationId format');
+    }
+    generationId = normalized;
+  } else if (bodyObj.generationId === undefined) {
+    generationId = newGenerationId();
+    console.log(
+      '[generate-assets] generationId not provided, generated:',
+      generationId,
+    );
+  } else {
+    return badRequest('Invalid generationId format');
+  }
+
+  // ---- SD health check (preserved): cheap 2s probe -------------------------
+  const sdOk = await fetch(`${SD_BASE_URL}/sdapi/v1/options`, {
+    signal: AbortSignal.timeout(2000),
+  })
+    .then((r) => r.ok)
+    .catch(() => false);
+
   if (!sdOk) {
-    return NextResponse.json({
+    return fallbackOk({
       background_url: null,
       character_url: null,
       platform_url: null,
       generated: false,
+      generationId,
       message: 'Stable Diffusion offline — using procedural visuals',
-    }, { status: 200 });
+    });
   }
 
-  const prompts = buildPrompts(config as GameConfig);
-  const results: Record<string, string | null> = {};
+  // ---- Phase 3: ensure per-id output dir exists ----------------------------
+  ensureAssetDir({ cwd: process.cwd(), kind: '2d', generationId });
 
-  // Generate all three assets concurrently
+  const config: GameConfig = parseGameConfig(bodyObj.config, '');
+  const prompts = buildPrompts(config);
+
+  // Generate all three assets concurrently (preserved).
   const [bgUrl, charUrl, platUrl] = await Promise.all([
-    generateImage(prompts.background.prompt, prompts.background.negative, prompts.background.filename),
-    generateImage(prompts.character.prompt, prompts.character.negative, prompts.character.filename),
-    generateImage(prompts.platform.prompt, prompts.platform.negative, prompts.platform.filename),
+    generateImage(
+      prompts.background.prompt,
+      prompts.background.negative,
+      prompts.background.filename,
+      generationId,
+    ),
+    generateImage(
+      prompts.character.prompt,
+      prompts.character.negative,
+      prompts.character.filename,
+      generationId,
+    ),
+    generateImage(
+      prompts.platform.prompt,
+      prompts.platform.negative,
+      prompts.platform.filename,
+      generationId,
+    ),
   ]);
 
-  results.background_url = bgUrl;
-  results.character_url = charUrl;
-  results.platform_url = platUrl;
+  const anyGenerated = Boolean(bgUrl || charUrl || platUrl);
 
-  const anyGenerated = Object.values(results).some(Boolean);
   return NextResponse.json({
-    ...results,
+    background_url: bgUrl,
+    character_url: charUrl,
+    platform_url: platUrl,
     generated: anyGenerated,
+    generationId,
     message: anyGenerated
       ? 'Assets generated successfully'
-      : 'Stable Diffusion unavailable — using procedural visuals',
+      : 'No assets produced',
   });
 }

@@ -3,6 +3,21 @@ import { Client } from '@gradio/client';
 import * as fs from 'fs';
 import * as path from 'path';
 import { withTimeout } from '@/lib/with-timeout';
+import {
+  normalizeGenerationId,
+  newGenerationId,
+} from '@/lib/generation-id';
+import {
+  buildAssetFsPath,
+  buildAssetUrl,
+  ensureAssetDir,
+  isSafeFilename,
+} from '@/lib/generated-paths';
+import { badRequest, fallbackOk, logApiError } from '@/lib/api-errors';
+import {
+  parseGameConfigExtended,
+  type ExtendedGameConfig,
+} from '@/lib/game-config-schema';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 // TRELLIS_URL = HuggingFace Space ID  →  "JeffreyXiang/TRELLIS-image-large"
@@ -13,14 +28,7 @@ const HF_TOKEN     = process.env.HF_TOKEN     || '';
 
 const IS_HF_SPACE  = !TRELLIS_URL.startsWith('http');
 
-const ASSETS_DIR   = path.join(process.cwd(), 'public', 'generated3d');
 const GODOT_DIR    = path.join(process.cwd(), '..', '..', 'godot', 'assets');
-
-function ensureDirs() {
-  [ASSETS_DIR, GODOT_DIR].forEach(d => {
-    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
-  });
-}
 
 // ─── Step 1: Generate reference image via Stable Diffusion ───────────────────
 async function generateSDImage(prompt: string): Promise<Buffer | null> {
@@ -45,14 +53,24 @@ async function generateSDImage(prompt: string): Promise<Buffer | null> {
     if (!b64) return null;
     return Buffer.from(b64, 'base64');
   } catch (err) {
-    console.error('SD image gen failed:', err);
+    logApiError('generate-3d/sd', err);
     return null;
   }
 }
 
 // ─── Step 2: TRELLIS image → GLB ─────────────────────────────────────────────
-async function trellisImageToGlb(imageBuffer: Buffer, filename: string): Promise<string | null> {
+async function trellisImageToGlb(
+  imageBuffer: Buffer,
+  filename: string,
+  generationId: string,
+  writeGodot: boolean,
+): Promise<{ url: string | null; wroteGodot: boolean }> {
   try {
+    // Defensive — filename must be one of the safe basenames we control.
+    if (!isSafeFilename(filename)) {
+      throw new Error(`unsafe filename: ${filename}`);
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const connectOpts: any = HF_TOKEN ? { hf_token: HF_TOKEN } : {};
     const client = await withTimeout(
@@ -100,7 +118,7 @@ async function trellisImageToGlb(imageBuffer: Buffer, filename: string): Promise
     // Download the GLB file from the Gradio temp URL
     const glbData = (glbResult.data as { url?: string; path?: string }[])[0];
     const glbUrl  = glbData?.url || glbData?.path;
-    if (!glbUrl) return null;
+    if (!glbUrl) return { url: null, wroteGodot: false };
 
     // Gradio returns local paths or full URLs depending on local vs HF Space
     let glbBuffer: Buffer;
@@ -112,31 +130,36 @@ async function trellisImageToGlb(imageBuffer: Buffer, filename: string): Promise
       glbBuffer = fs.readFileSync(glbUrl);
     }
 
-    ensureDirs();
-    const webPath   = path.join(ASSETS_DIR, filename);
-    const godotPath = path.join(GODOT_DIR, filename);
+    // Ensure the per-generation directory exists and write under it.
+    ensureAssetDir({ cwd: process.cwd(), kind: '3d', generationId });
+    const webPath = buildAssetFsPath({
+      cwd: process.cwd(),
+      kind: '3d',
+      generationId,
+      filename,
+    });
     fs.writeFileSync(webPath, glbBuffer);
-    fs.writeFileSync(godotPath, glbBuffer);
 
+    let wroteGodot = false;
+    if (writeGodot) {
+      if (!fs.existsSync(GODOT_DIR)) fs.mkdirSync(GODOT_DIR, { recursive: true });
+      const godotPath = path.join(GODOT_DIR, filename);
+      fs.writeFileSync(godotPath, glbBuffer);
+      wroteGodot = true;
+    }
+
+    const publicUrl = buildAssetUrl({ kind: '3d', generationId, filename });
     console.log(`TRELLIS: Generated ${filename} (${(glbBuffer.length / 1024).toFixed(0)} KB)`);
-    return `/generated3d/${filename}`;
+    return { url: publicUrl, wroteGodot };
 
   } catch (err) {
-    console.error(`TRELLIS failed for ${filename}:`, err);
-    return null;
+    logApiError('generate-3d/trellis', err);
+    return { url: null, wroteGodot: false };
   }
 }
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────
-interface GameConfig {
-  mood: string;
-  style: string;
-  main_character?: { description?: string; color?: string };
-  meshy_character_prompt?: string;
-  meshy_environment_prompt?: string;
-}
-
-function buildSDPrompts(config: GameConfig) {
+function buildSDPrompts(config: ExtendedGameConfig) {
   const mood = config.mood || 'surreal_calm';
   const style = config.style || 'surreal';
   const charDesc = config.main_character?.description || 'dream wanderer';
@@ -167,16 +190,49 @@ function buildSDPrompts(config: GameConfig) {
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
-  const { config } = await req.json();
-  if (!config) return NextResponse.json({ error: 'No config' }, { status: 400 });
+  const writeGodot = process.env.WRITE_GODOT_ASSETS === '1';
+  console.log('[generate-3d] WRITE_GODOT_ASSETS =', writeGodot ? 'on' : 'off');
+
+  // 1. Parse + validate request body.
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return badRequest('Invalid JSON body');
+  }
+
+  if (body === null || typeof body !== 'object') {
+    return badRequest('Invalid JSON body');
+  }
+
+  const b = body as { config?: unknown; generationId?: unknown };
+
+  if (!b.config || typeof b.config !== 'object') {
+    return badRequest('Field "config" is required', { field: 'config' });
+  }
+  const config = parseGameConfigExtended(b.config, '');
+
+  // 2. Resolve generationId.
+  let generationId: string;
+  if (b.generationId === undefined) {
+    generationId = newGenerationId();
+    console.log('[generate-3d] generationId not provided, generated:', generationId);
+  } else {
+    const normalized = normalizeGenerationId(b.generationId);
+    if (!normalized) {
+      return badRequest('Invalid generationId format');
+    }
+    generationId = normalized;
+  }
 
   // For HF Space, check token; for local, ping the server
   if (IS_HF_SPACE && !HF_TOKEN) {
-    return NextResponse.json({
+    return fallbackOk({
       error: 'HF_TOKEN not set',
       message: 'Get a free token at huggingface.co/settings/tokens, then add HF_TOKEN=hf_xxx to .env.local',
-      fallback: true,
-    }, { status: 200 });
+      wrote_godot: false,
+      generationId,
+    });
   }
 
   // Cheap probe to detect sleeping/building HF Spaces before paying the Gradio
@@ -188,11 +244,12 @@ export async function POST(req: NextRequest) {
       if (probe.ok) {
         const info = await probe.json();
         if (info?.runtime?.stage && info.runtime.stage !== 'RUNNING') {
-          return NextResponse.json({
+          return fallbackOk({
             error: `HF Space stage: ${info.runtime.stage}`,
             message: 'TRELLIS HF Space is not running (sleeping/building). Try again in ~30s.',
-            fallback: true,
-          }, { status: 200 });
+            wrote_godot: false,
+            generationId,
+          });
         }
       }
     } catch { /* probe failed — proceed anyway */ }
@@ -205,71 +262,93 @@ export async function POST(req: NextRequest) {
     const localOk = await fetch(`${TRELLIS_URL}/info`, { signal: AbortSignal.timeout(3000) })
       .then(r => r.ok).catch(() => false);
     if (!localOk) {
-      return NextResponse.json({
+      return fallbackOk({
         error: 'Local TRELLIS not running',
         message: `Note: TRELLIS requires Linux + NVIDIA CUDA GPU. On macOS use HF Space instead: set TRELLIS_URL=JeffreyXiang/TRELLIS-image-large`,
-        fallback: true,
-      }, { status: 200 });
+        wrote_godot: false,
+        generationId,
+      });
     }
   }
 
-  const prompts = buildSDPrompts(config as GameConfig);
-  const results: Record<string, string | null> = {};
-  const log: string[] = [`TRELLIS OK, SD ${sdOk ? 'OK' : 'offline'}`];
-
-  // Hard ceiling for the whole request — abandons remaining prompts if exceeded.
-  const deadline = Date.now() + 60_000;
-
-  // Sequential generation (TRELLIS is stateful between steps A/B/C per session)
-  for (const { sdPrompt, filename } of prompts) {
-    if (Date.now() > deadline) {
-      log.push(`deadline reached, skipping rest`);
-      break;
-    }
-    try {
-      // 1. Generate reference image
-      let imgBuffer: Buffer | null = null;
-      if (sdOk) {
-        imgBuffer = await generateSDImage(sdPrompt);
-        if (imgBuffer) log.push(`SD → ${filename.replace('.glb', '.png')} OK`);
-      }
-
-      if (!imgBuffer) {
-        // Fallback: 1×1 white pixel — TRELLIS will still try but quality will be poor
-        log.push(`SD failed for ${filename}, using placeholder`);
-        // Skip this asset rather than waste TRELLIS credits
-        results[filename.replace('.glb', '_url')] = null;
-        continue;
-      }
-
-      // 2. TRELLIS: image → GLB
-      const glbUrl = await trellisImageToGlb(imgBuffer, filename);
-      results[filename.replace('.glb', '_url')] = glbUrl;
-      if (glbUrl) log.push(`TRELLIS → ${filename} OK`);
-
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.push(`Error ${filename}: ${msg}`);
-      results[filename.replace('.glb', '_url')] = null;
-    }
-  }
-
-  // Write final config + asset URLs for Godot
-  const finalConfig = { ...config, assets: results };
-  ensureDirs();
-  const publicCfg = path.join(process.cwd(), 'public', 'dream_config.json');
-  fs.writeFileSync(publicCfg, JSON.stringify(finalConfig, null, 2));
   try {
-    const godotCfg = path.join(GODOT_DIR, '..', 'dream_config.json');
-    fs.writeFileSync(godotCfg, JSON.stringify(finalConfig, null, 2));
-  } catch { /* godot dir may not exist */ }
+    const prompts = buildSDPrompts(config);
+    const results: Record<string, string | null> = {};
+    const log: string[] = [`TRELLIS OK, SD ${sdOk ? 'OK' : 'offline'}`];
+    let wroteGodotAny = false;
 
-  const generated = Object.values(results).filter(Boolean).length;
-  return NextResponse.json({
-    ...results,
-    generated,
-    total: prompts.length,
-    log,
-    message: `${generated}/${prompts.length} 3D assets generated via TRELLIS`,
-  });
+    // Hard ceiling for the whole request — abandons remaining prompts if exceeded.
+    const deadline = Date.now() + 60_000;
+
+    // Sequential generation (TRELLIS is stateful between steps A/B/C per session)
+    for (const { sdPrompt, filename } of prompts) {
+      if (Date.now() > deadline) {
+        log.push(`deadline reached, skipping rest`);
+        break;
+      }
+      try {
+        // 1. Generate reference image
+        let imgBuffer: Buffer | null = null;
+        if (sdOk) {
+          imgBuffer = await generateSDImage(sdPrompt);
+          if (imgBuffer) log.push(`SD → ${filename.replace('.glb', '.png')} OK`);
+        }
+
+        if (!imgBuffer) {
+          // Fallback: 1×1 white pixel — TRELLIS will still try but quality will be poor
+          log.push(`SD failed for ${filename}, using placeholder`);
+          // Skip this asset rather than waste TRELLIS credits
+          results[filename.replace('.glb', '_url')] = null;
+          continue;
+        }
+
+        // 2. TRELLIS: image → GLB
+        const { url: glbUrl, wroteGodot: gw } =
+          await trellisImageToGlb(imgBuffer, filename, generationId, writeGodot);
+        results[filename.replace('.glb', '_url')] = glbUrl;
+        if (gw) wroteGodotAny = true;
+        if (glbUrl) log.push(`TRELLIS → ${filename} OK`);
+
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.push(`Error ${filename}: ${msg}`);
+        results[filename.replace('.glb', '_url')] = null;
+      }
+    }
+
+    // Write final config + asset URLs for Godot
+    const finalConfig = { ...config, assets: results, generationId };
+    const publicCfg = path.join(process.cwd(), 'public', 'dream_config.json');
+    fs.writeFileSync(publicCfg, JSON.stringify(finalConfig, null, 2));
+
+    if (writeGodot) {
+      try {
+        if (!fs.existsSync(GODOT_DIR)) fs.mkdirSync(GODOT_DIR, { recursive: true });
+        const godotCfg = path.join(GODOT_DIR, '..', 'dream_config.json');
+        fs.writeFileSync(godotCfg, JSON.stringify(finalConfig, null, 2));
+        wroteGodotAny = true;
+      } catch (err) {
+        logApiError('generate-3d/godot-config', err);
+      }
+    }
+
+    const generated = Object.values(results).filter(Boolean).length;
+    return NextResponse.json({
+      ...results,
+      generated,
+      total: prompts.length,
+      log,
+      generationId,
+      wrote_godot: wroteGodotAny,
+      message: `${generated}/${prompts.length} 3D assets generated via TRELLIS`,
+    });
+  } catch (err) {
+    const safe = logApiError('generate-3d/unhandled', err);
+    return fallbackOk({
+      error: safe.name,
+      message: safe.message,
+      wrote_godot: false,
+      generationId,
+    });
+  }
 }
