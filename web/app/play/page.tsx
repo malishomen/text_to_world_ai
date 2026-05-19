@@ -217,10 +217,12 @@ export default function PlayPage() {
           generationId={generationId ?? 'no-id'}
           onComplete={() => setIntroDone(true)}
           onEngineReady={(engine) => {
-            // Strict-mode double-mount safety: dispose any prior stinger
-            // engine before creating a new one (otherwise its timers +
-            // oscillators leak on every dev remount).
+            // Strict-mode double-mount safety: dispose any prior audio +
+            // stinger engines before swapping in the new one. CinematicIntro's
+            // 2nd mount creates a fresh AudioEngine; without this dispose
+            // the first engine's oscillators + LFO timers leak.
             stingerEngineRef.current?.dispose();
+            audioEngineRef.current?.dispose().catch(() => {});
             audioEngineRef.current = engine;
             stingerEngineRef.current = createStingers(engine);
           }}

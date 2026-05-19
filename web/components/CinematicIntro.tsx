@@ -554,6 +554,19 @@ export default function CinematicIntro(
         voicesChangedHandlerRef.current = null;
       }
       // Engine intentionally NOT disposed — parent owns its lifetime.
+      //
+      // React strict-mode double-mount safety: reset all flag refs so the
+      // 2nd mount (which always follows in dev) can re-run the choreography
+      // fresh. Without this reset, typewriterCancelRef stayed `true` and
+      // the typewriter never started — overlay sat black with only ambient.
+      typewriterCancelRef.current = false;
+      typewriterDoneRef.current = false;
+      audioDoneRef.current = false;
+      fastForwardRef.current = false;
+      currentWordIdxRef.current = 0;
+      // completedRef NOT reset — if we already faded out and called onComplete,
+      // we never want to repeat that.
+      startedRef.current = false;
     };
     // We deliberately run only on first mount; props are captured in closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
