@@ -634,6 +634,71 @@ varied, flat-fill ground, no silhouettes between platforms and sky.
 
 ---
 
+### 2026-05-19: TRELLIS v1 → v2 (microsoft/TRELLIS.2) — PBR-materials backend swap
+**Request:** User pointed at https://github.com/microsoft/TRELLIS.2 — "проверь".
+Discovered the v2 model has a public HF Space (`microsoft/TRELLIS.2`) so the
+upgrade is a zero-infrastructure env change for our pipeline.
+
+**Findings:**
+- TRELLIS.2: 4B model, MIT license, image-to-3D with PBR materials (BaseColor +
+  Roughness + Metallic + Opacity). Native install needs Linux + CUDA 12.4 +
+  24GB VRAM — irrelevant when using the HF Space.
+- HF Space `microsoft/TRELLIS.2` exposes the SAME three Gradio endpoint
+  names we already call (`/preprocess_image`, `/image_to_3d`, `/extract_glb`),
+  plus optional `/start_session` / `/end_session` we can ignore.
+- But the signatures are DIFFERENT:
+  - `/image_to_3d` v1 took 7 named params (`ss_*`, `slat_*`, `seed`,
+    `randomize_seed`); v2 takes a 15-element POSITIONAL list driving 3
+    sub-stages (shape → PBR pass A → PBR pass B), plus a Resolution radio
+    `"512"|"1024"|"1536"`. v1's named-param form is rejected by v2 because
+    the Space has 4 sets of identically-labelled sliders ("Guidance
+    Strength" appears 3× across stages).
+  - `/extract_glb` v1 took `{mesh_simplify_ratio, texture_size}`; v2
+    requires `[state, decimation_target (int face count), texture_size]`.
+    Default decimation_target in the Space UI is 300000; we use 60000 to
+    keep GLBs lightweight for late-asset streaming.
+  - @gradio/client 2.2 accepts both positional arrays and named objects
+    (`predict(endpoint, data: unknown[] | Record<string, unknown>)`), so the
+    adapter just switches shape based on URL detection.
+- Inference on H100 per the README: 3s @ 512³ / 17s @ 1024³ / 60s @ 1536³.
+  HF Space uses free Zero GPU (much slower) plus cold-start; conservative
+  client timeout bumped to 120s for v2 (was 90s).
+
+**Changes:**
+- `web/app/api/generate-3d/route.ts`:
+  - `TRELLIS_URL` default flipped from `JeffreyXiang/TRELLIS-image-large` (v1)
+    to `microsoft/TRELLIS.2` (v2).
+  - Added `IS_TRELLIS_V2` constant — regex `/trellis\.?2/i` against
+    `TRELLIS_URL`.
+  - `trellisImageToGlb` now branches on `IS_TRELLIS_V2`:
+    - v2 `/image_to_3d`: positional 15-array, Resolution=512 (smallest, ~3s
+      shape on H100), seed pre-generated, 3-stage gs/gr/steps/rescaleT
+      defaults copied from the Space UI sliders.
+    - v2 `/extract_glb`: positional `[null, 60000, 1024]` (state, decimation
+      target, texture size). The `null` state arg relies on @gradio/client
+      auto-passing the prior call's session output.
+    - v1 path preserved as the else branch — no regression for callers that
+      explicitly set TRELLIS_URL back to v1.
+- `web/.env.local`: `TRELLIS_URL=microsoft/TRELLIS.2`, comment updated.
+- `docs/PROJECT_MAP.yaml`: env table, api endpoint description, and
+  architecture.runtime_processes entry all reflect v2 as default with v1
+  as fallback.
+
+**Verification so far:**
+- npx tsc --noEmit clean.
+- Gradio /config endpoint of `microsoft-trellis-2.hf.space` confirmed the
+  endpoint names and param positions used by the adapter.
+- Live smoke test pending (next step).
+
+**Tier 1.5 path opened:**
+With v2 producing real PBR-materials character GLBs, the existing Player
+fallback chain (TRELLIS GLB → LLaMA-Mesh OBJ → procedural mood-shape) will
+finally hit the top tier when assets land in time. Future work: wire v2's
+prop.glb as the `InstancedProps` source — judges would see judges-quality
+geometry scattered across terrain instead of the procedural primitives.
+
+---
+
 ## 5. Current operational state
 
 **Live environments (as of 2026-05-19, post-P0–P4):**
