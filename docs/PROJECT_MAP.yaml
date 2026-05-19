@@ -84,7 +84,7 @@ tech_stack:
 directory_structure:
   web/:
     app/:
-      page.tsx: "Landing — dream input form, navigates to /loading-dream"
+      page.tsx: "Landing — dream input form. handleSubmit clears stale localStorage (gameConfig/gameAssets/generationId) before navigating to /loading-dream so each new dream gets a fresh level seed."
       loading-dream/page.tsx: "Loading screen — orchestrates analyze + fire-and-forget asset calls + hard timeout (Phase A) → /play"
       play/page.tsx: "Game shell — sidebar + DreamGame3D canvas; guards on gameConfig in localStorage"
       layout.tsx: "Root layout"
@@ -94,7 +94,13 @@ directory_structure:
         generate-3d/route.ts: "POST — SD → reference PNG → TRELLIS → 3 GLBs under public/generated3d/<generationId>/; optional Godot mirror"
         generate-assets/route.ts: "POST — SD → 3 PNG sprites under public/generated/<generationId>/; ~2s SD health probe"
     components/:
-      DreamGame3D.tsx: "R3F Canvas: Player + Platforms + Enemies + GoalPortal + FollowCamera; seeded RNG via makeRng (Phase 6)"
+      DreamGame3D.tsx: |
+        R3F Canvas: Player + Platforms + Enemies + GoalPortal + FollowCamera; seeded RNG via makeRng (Phase 6).
+        Tone mapping: THREE.ACESFilmicToneMapping with toneMappingExposure 1.2 (set via onCreated). DO NOT pass numeric toneMapping values — `3` is CineonToneMapping (deprecated, overexposes to white), `4` is ACESFilmic; always use the THREE constant.
+        World convention: right-handed; camera lives at player.z+16 looking toward -Z; level extends in -Z; W=-Z (forward), S=+Z, A=-X, D=+X. Reversing any one of these alone produces a mirrored render.
+        Per-mood visual presets via moodPresetFor(): 8 presets keyed by LLM `mood` enum (surreal_calm | dark_fantasy | cozy_dream | nightmare | cyber_dream | ethereal | whimsical | cosmic) drive playerShape (icosahedron/tetrahedron/octahedron/dodecahedron/sphere), platformDecoration (crystal/spire/orb/mushroom/neon), enemyShape, enemyColor, skyTopColor, skyBottomColor, groundColor, plus fog/lights/particles.
+        Components: SkyDome (custom back-side sphere shader, zenith→horizon gradient), GroundPlane (optional per-mood floor at y=-4), PlatformDecoration (non-physics flair on each non-spawn platform).
+        Enter / NumpadEnter / Space restart the run from the win/dead overlays.
     lib/:
       fallback-config.ts: "buildFallback(dream) + GameConfig type (Phase A) — single source of truth for default configs"
       with-timeout.ts: "withTimeout(promise, ms, label) helper (Phase B)"
@@ -145,7 +151,7 @@ api:
   auth_header: none
   endpoints:
     generation:
-      - "POST /api/analyze — body: {dream:string} (trimmed, ≤5000 chars). Returns normalized GameConfig JSON via zod + parseGameConfigExtended. Response shape now includes optional extended fields (meshy_character_prompt, meshy_environment_prompt, weather, time_of_day, fog_density, terrain_height_scale, godot_environment_hints) when the LLM provides them. Always 200 — falls back to buildFallback(dream) on any LLM error. 400 on invalid body."
+      - "POST /api/analyze — body: {dream:string} (trimmed, ≤5000 chars). Returns normalized GameConfig JSON via zod + parseGameConfigExtended. SYSTEM_PROMPT trimmed to the 11 fields the React scene consumes; LM Studio is called with response_format.json_schema (strict) so the model is FORCED to emit conforming JSON (LM Studio rejects OpenAI's `json_object`; only `json_schema` or `text` accepted). Qwen3 reasoning suppressed via chat_template_kwargs.enable_thinking:false + /no_think directive — otherwise <think> blocks consume the max_tokens budget and the truncated payload fails JSON.parse. LLM_TIMEOUT_MS env-configurable (default 60000). Always 200 — falls back to buildFallback(dream) on any LLM error. 400 on invalid body. Raw model content logged on parse failure for diagnostics."
       - "POST /api/generate-3d — body: {config:object, generationId?:string}. config is validated through parseGameConfigExtended (no deep-trust). Pipeline: SD reference PNG → TRELLIS (preprocess → image_to_3d → extract_glb). Writes to public/generated3d/<generationId>/{character,prop,portal}.glb. Response: {character_url, prop_url, portal_url, generated, total, log, generationId, wrote_godot, message}. Returns fallbackOk({fallback:true,...}) if HF_TOKEN missing, HF Space sleeping, or local TRELLIS unreachable."
       - "POST /api/generate-assets — body: {config:object, generationId?:string}. config is validated through parseGameConfig. Writes to public/generated/<generationId>/{background,character,platform}.png. Response: {background_url, character_url, platform_url, generated, generationId, message}. ~2s SD health probe; returns nulls if SD offline (never blocks /play)."
 
@@ -168,12 +174,13 @@ env:
   required_always: {}
   optional:
     QWEN_BASE_URL: "Local LLM endpoint (OpenAI-compatible). Default http://localhost:1234 (LM Studio). Ollama also works at http://localhost:11434."
-    QWEN_MODEL: "Model name. Default qwen3-coder-30b-a3b-instruct-mlx"
+    QWEN_MODEL: "Model id reported by the local server's /v1/models list. Code default is qwen3-coder-30b-a3b-instruct-mlx (Apple-Silicon MLX build, will NOT run on Windows/Linux). On Windows the recommended replacement is qwen3-8b-gemini-3-pro-preview-distill (Q6_K GGUF, ~6.7 GB, JSON-schema friendly, ~15-20s response under LM Studio 0.4)."
     SD_BASE_URL: "Automatic1111 SD endpoint. Default http://127.0.0.1:7860"
     TRELLIS_URL: "HF Space id or http URL. Default JeffreyXiang/TRELLIS-image-large"
     HF_TOKEN: "Required when TRELLIS_URL is an HF Space. Get a free token at huggingface.co/settings/tokens."
-    NEXT_PUBLIC_MAX_GENERATION_MS: "Client hard-timeout for /loading-dream before forcing navigation. Default 75000"
-    NEXT_PUBLIC_DEV_FAKE_AI: "If '1', loading-dream skips all APIs and uses fallback after 3s (great for UI / scene work)"
+    LLM_TIMEOUT_MS: "Server-side fetch timeout inside /api/analyze for the LLM call. Default 60000 (was hardcoded 25000 — too tight for 8B models on CPU/modest GPU; previously caused silent fallbacks)."
+    NEXT_PUBLIC_MAX_GENERATION_MS: "Client hard-timeout on /loading-dream before forcing navigation to /play. Default 75000. Bump to 90000+ when real LLM is wired up so the analyze response can settle before the navigate timer fires."
+    NEXT_PUBLIC_DEV_FAKE_AI: "If '1', loading-dream skips all APIs and uses fallback after 3s (great for UI / scene work). Default '0' (real pipeline)."
     WRITE_GODOT_ASSETS: "If literal string '1', generate-3d also writes GLBs into ../../godot/assets/ and dream_config.json into godot/"
   ops:
     NODE_ENV: "development|production"

@@ -386,6 +386,101 @@ project-memory-trinity skill.
 
 ---
 
+### 2026-05-19: Render unblocked — ACES tonemapping, Z-handedness, LLM JSON-schema, per-mood scene identity
+**Request:** "запусти проект локально" → multi-stage debug as the demo failed at each layer.
+Final goal: win the hackathon — visible, distinct scenes per dream, real LLM in the loop.
+
+**Findings:**
+- `gl={{ toneMapping: 3 /* ACESFilmic */ }}` was a **lie**: in Three.js 0.184 the numeric `3`
+  is `CineonToneMapping` (deprecated). Combined with the scene's strong ambient + directional
+  + 2 point lights, Cineon at default exposure clipped the entire canvas to pure white.
+- Camera lived at `(0, 12, -18)` looking toward +Z while the level extended in +Z. In Three's
+  right-handed coords this maps world +X to screen LEFT — every dream rendered mirrored
+  (3D narrative text read backwards, A/D inverted). Fixing controls alone could not fix
+  the mirror — required full Y-axis rotation of the world (camera+level+W/S).
+- Bumped ambient/directional/point-light intensities ~3× to compensate for moving from
+  the overexposing Cineon to physically-correct ACES. Old intensities (ambient 0.5, dir 2,
+  point 3+2) were tuned to the broken pipeline; under ACES the scene was nearly black.
+- `/api/analyze` had `LLM_TIMEOUT_MS=25000` hardcoded with a SYSTEM_PROMPT asking for 20+
+  deeply nested fields (meshy prompts, godot env hints, weather, fog, etc.) the React
+  scene does not consume. Every call timed out at exactly 25.0s and silently fell back
+  to `buildFallback(dream)` — the "AI" the user saw was the keyword router, not the LLM.
+- After bumping the timeout, Qwen3-class models emit `<think>` blocks by default and ate
+  the 500-token budget before reaching valid JSON. Three things together fixed it:
+  (1) `response_format: { type: 'json_schema', json_schema: { strict: true, schema: {...} } }`
+  — LM Studio rejects OpenAI's `json_object` with "must be 'json_schema' or 'text'";
+  (2) `chat_template_kwargs: { enable_thinking: false }` + `/no_think` in the user message;
+  (3) prompt trimmed to the 11 fields actually rendered. Result: real LLM responds in
+  ~15-19s vs no response in 25s.
+- Landing's `handleSubmit` only wrote `dreamText` to localStorage and did NOT clear
+  `gameConfig`/`gameAssets`/`generationId`. `/loading-dream` had sticky-id logic that
+  reused the same `generationId` across dreams → `generateLevel(generationId)` produced
+  the same platform layout for every new dream forever.
+- Scene was visually identical across dreams even when LLM produced different `mood/style/
+  palette` — only palette colors and platform counts changed; geometry was hardcoded.
+
+**Changes (chronological, all on `test`):**
+- `web/components/DreamGame3D.tsx`:
+  - Tone mapping: `gl={{ toneMapping: THREE.ACESFilmicToneMapping }}` + `onCreated` sets
+    `gl.toneMappingExposure = 1.2`. Never pass numeric values for tone mapping.
+  - Camera & level flipped to standard right-handed convention: camera initial
+    `[0, 12, 18]`, follow target `t.z + 16`, `level z` extends in `-Z` (starts at `-7`,
+    decrements), `W: vz -= speed`, `S: vz += speed`. Sparkles and narrative-text z signs
+    inverted to match.
+  - Light intensities raised: ambient 0.5→1.5, directional 2→5, points 3→80 and 2→60
+    (post-r155 physical units).
+  - Enter/NumpadEnter/Space restart from win/dead overlays (was mouse-only).
+  - `MoodPreset` extended with `playerShape | platformDecoration | enemyShape | enemyColor |
+    skyTopColor | skyBottomColor | groundColor`; 8 presets cover the full LLM enum.
+  - New components: `SkyDome` (custom back-side sphere fragment shader, zenith→horizon
+    gradient — replaces flat `<color attach="background">`), `GroundPlane` (optional
+    per-mood floor), `PlatformDecoration` (crystal/spire/orb/mushroom/neon meshes,
+    non-physics, on every non-spawn platform).
+  - `ProceduralBall`, `Player`, `Enemy` accept `shape` + (for Enemy) `color` props.
+- `web/app/page.tsx`: `handleSubmit` clears `gameConfig`/`gameAssets`/`generationId`
+  before navigating, so every dream starts from a clean slate.
+- `web/app/api/analyze/route.ts`:
+  - `LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS) || 60000` (was hardcoded 25000).
+  - `LLM_MAX_TOKENS = 1500` (was 500 — too tight when thinking can't be fully disabled).
+  - SYSTEM_PROMPT slimmed to the 11 rendered fields.
+  - Body adds `response_format: { type: 'json_schema', json_schema: { strict: true,
+    schema: {...} } }` AND `chat_template_kwargs: { enable_thinking: false }`.
+  - User message ends with `/no_think`.
+  - Raw model content logged on JSON parse failure for future diagnostics.
+- `web/.env.local` (gitignored, user machine only):
+  - `NEXT_PUBLIC_DEV_FAKE_AI=0`
+  - `NEXT_PUBLIC_MAX_GENERATION_MS=90000`
+  - `LLM_TIMEOUT_MS=60000`
+  - `QWEN_MODEL=qwen3-8b-gemini-3-pro-preview-distill` (was the MLX default that won't
+    run on Windows; this is a Q6_K GGUF that works in LM Studio 0.4.2 on the user's box)
+
+**Commits:**
+- `c75ea92` fix(3d): correct tone mapping, flip Z handedness, bump lights, Enter to restart
+- `2b6e2fe` feat(analyze): force structured JSON via LM Studio json_schema, slim prompt
+- `44352b0` feat(scene): per-mood visual identity — player shape, decorations, sky gradient, ground
+
+`c75ea92` was merged to `main` on user's `merge main now`. `2b6e2fe` and `44352b0`
+sit on `test` only — no main merge yet.
+
+**Current state:**
+- Demo path end-to-end works: dream input → real LLM (Qwen3 8B Gemini 3 Pro Preview
+  Q6_K, ~15-19s response) → distinct per-mood scene with gradient sky, shaped player,
+  decorated platforms, themed enemies → playable on /play.
+- All visible AI is real; SD and TRELLIS still off, assets pipeline returns nulls
+  fast, scene renders procedurally without blocking.
+- Branch `test` ahead of `main` by 2 commits.
+
+**Remaining / artifacts:**
+- External-model decision pending: Meshy.ai (paid, ~30s, PBR-quality GLB, requires
+  API key) vs LLaMA-Mesh (local, free, OBJ-only, low-poly, would need its own LM Studio
+  slot alongside Qwen3) vs status quo (TRELLIS via HF Space).
+- Trinity catch-up (this entry) — PROJECT_MAP.yaml updated to reflect new env vars,
+  the ACES/coordinate convention, and the per-mood preset system; memory.md gets this
+  log entry. **Convention 2 was violated for 3 commits before this fix-up — agent must
+  do the trinity sync inside the same session as the code change in future.**
+
+---
+
 ## 5. Current operational state
 
 **Live environments (as of 2026-05-19, post-P0–P4):**
