@@ -727,6 +727,85 @@ geometry scattered across terrain instead of the procedural primitives.
 
 ---
 
+### 2026-05-19: Path A — FLUX via fal.ai (TRELLIS gated behind feature flag)
+
+**Request:** "Path A — FLUX through fal.ai". User added $10 to fal.ai. Goal:
+unlock real image generation feeding TRELLIS.2 for PBR character GLBs.
+
+**Live discovery during integration:** ALL TRELLIS HF Spaces upstream
+are broken (verified via HF API):
+- `microsoft/TRELLIS.2` — RUNTIME_ERROR ("No module named 'cumesh'")
+- `microsoft/TRELLIS` — CONFIG_ERROR
+- `JeffreyXiang/TRELLIS-image-large` — Repository not found (removed)
+- `gokaygokay/Flux-TRELLIS` — BUILD_ERROR
+
+Microsoft's TRELLIS infrastructure is in outage we cannot fix.
+
+**Pivot strategy (user-approved):** FLUX as the PRIMARY 2D asset
+generator (textures + backdrop + character card); TRELLIS pipeline
+kept intact but gated behind a `TRELLIS_ENABLED=1` env flag so we
+can re-enable instantly when upstream is fixed.
+
+**Implementation:**
+
+- `web/lib/image-gen.ts` — NEW shared backend dispatcher. Exports
+  `generateImage(opts)` (unified entry, branches on `SD_BACKEND`),
+  `getImageGenProvider()` (sync availability check), `probeImageGen()`
+  (a1111 network probe). Two providers:
+    - fal.ai FLUX schnell (`SD_BACKEND=fal`, default in .env.local)
+    - local A1111 (`SD_BACKEND=a1111`, legacy)
+  Image-size presets ('square', 'square_hd', 'landscape_4_3',
+  'portrait_4_3', 'landscape_16_9') map onto fal-native names or to
+  A1111 width/height pairs. Never throws — returns Buffer|null.
+
+- `web/app/api/generate-assets/route.ts` — refactored to use the shared
+  lib. New per-asset prompt engineering tuned per slot:
+    - `background.png`: landscape_16_9, wide cinematic backdrop, no characters
+    - `character.png`: portrait_4_3, hero card, isolated subject
+    - `platform.png`: square_hd, SEAMLESS TILEABLE texture (top-down
+       orthographic view, uniform lighting, no shadows that break at edges)
+  Per-mood style anchors + per-mood platform-texture descriptors
+  (e.g. nightmare = "cracked black obsidian with crimson veins").
+  Cache short-circuit: if all 3 files exist for a generationId, return
+  cached URLs in ~140 ms with zero image-gen cost. Per-asset cache too.
+
+- `web/app/api/generate-3d/route.ts` — feature-flagged. With
+  `TRELLIS_ENABLED` unset (default), returns
+  `fallbackOk({provider_status:'unavailable'})` in <500 ms before any
+  HF probe. /play's existing late-asset event handles null
+  character_3d → Player falls through to LLaMA-Mesh OBJ (already
+  working).
+
+- `.env.local` updated: `SD_BACKEND=fal`, `FAL_API_KEY=...`,
+  `TRELLIS_URL=JeffreyXiang/TRELLIS-image-large` (kept for when we
+  flip the flag), TRELLIS_ENABLED left unset.
+
+**Smoke tests (real fal.ai calls):**
+- /api/generate-assets fresh: 3.0 s for 3 PNGs (96+143+388 KB),
+  provider_status='available', log shows fal → all 3 OK.
+- /api/generate-assets cached: 0.14 s, "Cached assets (no image-gen
+  call)" — zero billing on reload.
+- /api/generate-3d short-circuit: 0.38 s,
+  provider_status='unavailable', no FLUX call, no TRELLIS handshake.
+
+**Cost this session:** ~$0.015 spent on fal.ai. $9.985 of $10 left
+≈ 666 more FLUX images budgeted.
+
+**Fallback chain on /play (no changes needed in DreamGame3D):**
+1. Player character: TRELLIS GLB (off) → LLaMA-Mesh OBJ → procedural mood-shape
+2. Platform textures: FLUX platform.png (tileable) → procedural mood color
+3. Background: FLUX background.png (currently NOT yet wired into SkyDome
+   — TODO for next iteration; Platform texture already consumed)
+
+**Pending work** (track here, not blocking this commit):
+- Wire FLUX background.png into the SkyDome shader as the horizon
+  gradient base when present.
+- Wire FLUX character.png as a 2D billboard fallback when no GLB/OBJ
+  available.
+- Re-enable TRELLIS when Microsoft fixes the Space.
+
+---
+
 ### 2026-05-19: Tier S — cinematic intro (narrator + ambient + stingers + presets), 5 parallel agents + post-audit
 **Request:** User asked for the "10/10 wow" version of Tier S. v1 plan
 self-audit had flagged 3 CRITICAL defects (procedural Web Audio tech-y,
