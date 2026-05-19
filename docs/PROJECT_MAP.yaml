@@ -116,6 +116,7 @@ directory_structure:
       fallback-config.ts: "buildFallback(dream) + GameConfig type (Phase A) — single source of truth for default configs"
       with-timeout.ts: "withTimeout(promise, ms, label) helper (Phase B)"
       rng.ts: "Shared deterministic LCG RNG + cheap string hash. Used by DreamGame3D (level/terrain seed), InstancedProps (prop scatter), GroundMist (puff layout)."
+      image-gen.ts: "Shared image-gen backend for /api/generate-3d + /api/generate-assets. Dispatches by SD_BACKEND env: 'fal' → fal.ai FLUX schnell (~$0.005/image, 1.5s, no local GPU) or 'a1111' → local SD WebUI. Exports getImageGenProvider() for status + generateImage() unified entry."
       demo-presets.ts: "Tier S: 6 hand-tuned preset cards (nightmare/cozy_dream/cyber_dream/cosmic/whimsical/surreal_calm). Each preset round-trips through parseGameConfig + isValidGenerationId at module load (bad preset crashes build, not demo). Preset clicks skip /loading-dream and write directly to localStorage."
       audio/:
         AudioEngine.ts: "Tier S: procedural ambient synthesis for 8 moods. 5-7 detuned oscillators + BiquadFilter + ConvolverNode synthetic IR + dual LFO. State machine: masterGain controls ambient (intro 0.35 → steady 0.5 via setAmbientGainTarget → ducked 0.18 via duck → muted 0). Separate oneShotBus for narrator/stinger SFX — mute-aware but not duck-aware. visibilitychange ramps to 0 on tab-hidden. MP3 override at /audio/ambient-<mood>.mp3 (404 = procedural)."
@@ -200,6 +201,10 @@ env:
     MESH_MODEL: "Model id for /api/generate-mesh — must match what LM Studio exposes for LLaMA-Mesh. Default 'llama-mesh' (bartowski/LLaMA-Mesh-GGUF Q4_K_M)."
     MESH_TIMEOUT_MS: "Server-side fetch timeout for /api/generate-mesh. Default 120000. LLaMA-Mesh streams OBJ token-by-token, ~50-60s per object on Q4_K_M."
     ELEVENLABS_API_KEY: "Tier S narrator. Set to a sk_... key from https://elevenlabs.io/app/settings/api-keys. Free tier ~10k chars/month covers the hackathon. If missing/empty, /api/generate-narration returns {source:'no-tts'} and CinematicIntro falls back to browser Web Speech API."
+    SD_BACKEND: "Image-gen backend selector. 'fal' (default for demo) = fal.ai FLUX schnell. 'a1111' = local Automatic1111 WebUI at SD_BASE_URL. Read once by web/lib/image-gen.ts."
+    FAL_API_KEY: "fal.ai API key (UUID:secret form, ~69 chars). Required when SD_BACKEND=fal. Get one at https://fal.ai/dashboard/keys; $5+ balance covers ~1500 schnell images."
+    FAL_MODEL: "fal.ai model slug. Default 'fal-ai/flux/schnell' (4-step distilled, ~1.5s, $0.005/image at square_hd). Switch to 'fal-ai/flux/dev' for higher quality at higher latency + cost."
+    TRELLIS_ENABLED: "Set to '1' to attempt image-to-3D via TRELLIS. Default OFF — all known Microsoft TRELLIS HF Spaces are currently in RUNTIME_ERROR/CONFIG_ERROR (May 2026 outage). Re-enable when upstream is fixed; pipeline stays intact behind this flag."
     NEXT_PUBLIC_MAX_GENERATION_MS: "Client hard-timeout on /loading-dream before forcing navigation to /play. Default 75000. Bump to 90000+ when real LLM is wired up so the analyze response can settle before the navigate timer fires."
     NEXT_PUBLIC_DEV_FAKE_AI: "If '1', loading-dream skips all APIs and uses fallback after 3s (great for UI / scene work). Default '0' (real pipeline)."
     WRITE_GODOT_ASSETS: "If literal string '1', generate-3d also writes GLBs into ../../godot/assets/ and dream_config.json into godot/"

@@ -1,7 +1,7 @@
 'use client';
 
 import { Canvas, useFrame, useThree, useLoader } from '@react-three/fiber';
-import { Stars, Sparkles, Float, Text, useGLTF, useTexture } from '@react-three/drei';
+import { Stars, Sparkles, Float, Text, useGLTF, useTexture, Billboard } from '@react-three/drei';
 import { Physics, RigidBody, RapierRigidBody, BallCollider, CuboidCollider } from '@react-three/rapier';
 import { useRef, useEffect, useState, useMemo, useCallback, Suspense, Component, ReactNode } from 'react';
 import * as THREE from 'three';
@@ -165,6 +165,44 @@ function ObjCharacter({ url, color, meshRef }: {
   return <primitive ref={meshRef} object={prepared} />;
 }
 
+// FLUX-generated 2D character card as a face-camera billboard. Ranks below
+// GLB and OBJ in the Player precedence — used when no real geometry asset
+// is available but FLUX did produce a character.png. Better than the
+// procedural mood-shape because it carries the dream's actual visual
+// identity (described by the LLM, rendered by FLUX).
+function BillboardCharacter({ url, meshRef }: {
+  url: string;
+  meshRef: React.RefObject<THREE.Group | null>;
+}) {
+  const tex = useTexture(url, (t) => {
+    if (t instanceof THREE.Texture) {
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.needsUpdate = true;
+    }
+  });
+  // FLUX character.png uses portrait_4_3 aspect (768×1024). Plane height
+  // 1.6 matches a player-sized silhouette; width preserves aspect.
+  const aspect = 0.75;          // 768 / 1024
+  const height = 1.6;
+  const width = height * aspect;
+  return (
+    <Billboard ref={meshRef as unknown as React.RefObject<THREE.Group>}>
+      <mesh>
+        <planeGeometry args={[width, height]} />
+        <meshBasicMaterial
+          map={tex}
+          transparent
+          // alphaTest cuts the near-grey studio backdrop so the silhouette
+          // reads on the scene's own background rather than a sprite frame.
+          alphaTest={0.3}
+          side={THREE.DoubleSide}
+          toneMapped={false}    // preserve FLUX colours after ACES tonemap
+        />
+      </mesh>
+    </Billboard>
+  );
+}
+
 // ─── Player ──────────────────────────────────────────────────────────────────
 interface PlayerProps {
   bodyRef: React.RefObject<RapierRigidBody | null>;
@@ -172,6 +210,8 @@ interface PlayerProps {
   shape: PlayerShape;
   characterUrl?: string | null;
   characterObjUrl?: string | null;
+  /** FLUX 2D card url, used as a fallback billboard before procedural. */
+  character2dUrl?: string | null;
   keys: React.RefObject<Record<string, boolean>>;
   goalPos: THREE.Vector3;
   enemyPositions: THREE.Vector3[];
@@ -184,7 +224,7 @@ interface PlayerProps {
   onStep?: () => void;
 }
 
-function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin, onJump, onLand, onStep }: PlayerProps) {
+function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, character2dUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin, onJump, onLand, onStep }: PlayerProps) {
   const grounded = useRef(false);
   const canJump = useRef(true);
   const contacts = useRef(0);
@@ -314,6 +354,14 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, go
       }}
     >
       <BallCollider args={[0.55]} />
+      {/* Character precedence:
+            1. TRELLIS GLB                  (best — PBR-materials when alive)
+            2. LLaMA-Mesh OBJ                (low-poly real geometry, always-on)
+            3. FLUX 2D billboard            (dream-specific art, no depth)
+            4. Procedural mood-shape         (final mood-tinted primitive)
+          Each step falls back via Suspense + AssetBoundary if the asset
+          fails to load. The point-light follows the chosen branch so the
+          player always glows. */}
       {characterUrl ? (
         <AssetBoundary fallback={procedural}>
           <Suspense fallback={procedural}>
@@ -325,6 +373,13 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, go
         <AssetBoundary fallback={procedural}>
           <Suspense fallback={procedural}>
             <ObjCharacter url={characterObjUrl} color={col} meshRef={gltfRef} />
+            <pointLight ref={lightRef} color={col} intensity={2.5} distance={6} />
+          </Suspense>
+        </AssetBoundary>
+      ) : character2dUrl ? (
+        <AssetBoundary fallback={procedural}>
+          <Suspense fallback={procedural}>
+            <BillboardCharacter url={character2dUrl} meshRef={gltfRef} />
             <pointLight ref={lightRef} color={col} intensity={2.5} distance={6} />
           </Suspense>
         </AssetBoundary>
@@ -763,7 +818,44 @@ void main() {
   gl_FragColor = vec4(col, 1.0);
 }`;
 
-function SkyDome({ topColor, bottomColor }: { topColor: string; bottomColor: string }) {
+// Textured sky branch — used when FLUX produced a background image.
+// useTexture from drei suspends until the image decodes, so the parent
+// wraps this in <Suspense fallback={gradient material}/>. Equirectangular
+// mapping wraps the (typically 16:9) landscape image around the BackSide
+// of the dome sphere — distortion at poles is acceptable because we look
+// roughly toward the equator.
+function TexturedSkyMaterial({ url }: { url: string }) {
+  const tex = useTexture(url, (t) => {
+    const apply = (single: THREE.Texture) => {
+      single.mapping = THREE.EquirectangularReflectionMapping;
+      // Wide-format source repeats horizontally; vertical stretches once.
+      single.wrapS = THREE.RepeatWrapping;
+      single.wrapT = THREE.ClampToEdgeWrapping;
+      single.needsUpdate = true;
+    };
+    if (t instanceof THREE.Texture) apply(t);
+  });
+  return (
+    <meshBasicMaterial
+      attach="material"
+      side={THREE.BackSide}
+      depthWrite={false}
+      map={tex}
+      // Slight darken so the FLUX painting reads as a back-lit horizon,
+      // not a flat photo wallpaper.
+      color={new THREE.Color('#d8d8d8')}
+    />
+  );
+}
+
+function SkyDome({ topColor, bottomColor, backgroundUrl }: {
+  topColor: string;
+  bottomColor: string;
+  /** Optional FLUX-generated panoramic backdrop. When present and valid,
+   *  replaces the gradient material. When loading / failing, falls back
+   *  to the gradient via Suspense + AssetBoundary. */
+  backgroundUrl?: string | null;
+}) {
   const uniforms = useMemo(
     () => ({
       topColor: { value: new THREE.Color(topColor) },
@@ -771,17 +863,28 @@ function SkyDome({ topColor, bottomColor }: { topColor: string; bottomColor: str
     }),
     [topColor, bottomColor],
   );
+  // Reused as Suspense and AssetBoundary fallback — guarantees we never
+  // show a black sphere when the FLUX texture is still decoding or 404s.
+  const gradient = (
+    <shaderMaterial
+      attach="material"
+      side={THREE.BackSide}
+      depthWrite={false}
+      uniforms={uniforms}
+      vertexShader={skyVert}
+      fragmentShader={skyFrag}
+    />
+  );
   return (
     <mesh scale={[400, 400, 400]}>
       <sphereGeometry args={[1, 32, 16]} />
-      <shaderMaterial
-        attach="material"
-        side={THREE.BackSide}
-        depthWrite={false}
-        uniforms={uniforms}
-        vertexShader={skyVert}
-        fragmentShader={skyFrag}
-      />
+      {backgroundUrl ? (
+        <AssetBoundary fallback={gradient}>
+          <Suspense fallback={gradient}>
+            <TexturedSkyMaterial url={backgroundUrl} />
+          </Suspense>
+        </AssetBoundary>
+      ) : gradient}
     </mesh>
   );
 }
@@ -1253,7 +1356,11 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead,
 
   return (
     <>
-      <SkyDome topColor={skyTop} bottomColor={skyBottom} />
+      <SkyDome
+        topColor={skyTop}
+        bottomColor={skyBottom}
+        backgroundUrl={assets?.background_2d ?? null}
+      />
       <fogExp2 attach="fog" args={[fogColorHex, mp.fogDensity]} />
 
       {/* Lighting */}
@@ -1343,6 +1450,7 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead,
           shape={mp.playerShape}
           characterUrl={assets?.character_3d ?? null}
           characterObjUrl={assets?.character_obj ?? null}
+          character2dUrl={assets?.character_2d ?? null}
           keys={keys}
           goalPos={goalPos}
           enemyPositions={enemyPositions}
