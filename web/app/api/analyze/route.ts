@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { buildFallback } from '@/lib/fallback-config';
+import { parseGameConfig } from '@/lib/game-config-schema';
+import { badRequest, logApiError } from '@/lib/api-errors';
 
 const LM_BASE_URL = process.env.QWEN_BASE_URL || 'http://localhost:1234';
 const LM_MODEL = process.env.QWEN_MODEL || 'qwen3-coder-30b-a3b-instruct-mlx';
+
+const MAX_DREAM_LENGTH = 5000;
+const LLM_TIMEOUT_MS = 25000;
+const LLM_MAX_TOKENS = 1500;
 
 const SYSTEM_PROMPT = `You are DreamCraft AI — a cinematic game director converting dreams into AAA 3D game configurations.
 
@@ -45,12 +51,47 @@ IMPORTANT: Return ONLY valid JSON, no markdown, no explanation, no <think> tags.
   }
 }`;
 
-export async function POST(req: NextRequest) {
-  const { dream } = await req.json();
+interface LLMChatResponse {
+  choices?: Array<{ message?: { content?: string } }>;
+}
 
-  if (!dream?.trim()) {
-    return NextResponse.json({ error: 'No dream provided' }, { status: 400 });
+export async function POST(req: NextRequest) {
+  // -------------------------------------------------------------------------
+  // Phase 5: request validation
+  // -------------------------------------------------------------------------
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return badRequest('Invalid JSON body');
   }
+
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return badRequest('Field "dream" is required and must be a string', { field: 'dream' });
+  }
+
+  const rawDream = (body as Record<string, unknown>).dream;
+  if (typeof rawDream !== 'string') {
+    return badRequest('Field "dream" is required and must be a string', { field: 'dream' });
+  }
+
+  const dream = rawDream.trim();
+  if (dream.length === 0) {
+    return badRequest('Dream cannot be empty', { field: 'dream' });
+  }
+
+  if (dream.length > MAX_DREAM_LENGTH) {
+    return badRequest('Dream exceeds 5000 characters', {
+      field: 'dream',
+      max: MAX_DREAM_LENGTH,
+      actual: dream.length,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 2: LLM call + response normalization with graceful fallback
+  // -------------------------------------------------------------------------
 
   try {
     const res = await fetch(`${LM_BASE_URL}/v1/chat/completions`, {
@@ -60,13 +101,16 @@ export async function POST(req: NextRequest) {
         model: LM_MODEL,
         messages: [
           { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: `Dream: "${dream}"\n\nGenerate the game configuration JSON.` },
+          {
+            role: 'user',
+            content: `Dream: "${dream}"\n\nGenerate the game configuration JSON.`,
+          },
         ],
         temperature: 0.7,
-        max_tokens: 1500,
+        max_tokens: LLM_MAX_TOKENS,
         stream: false,
       }),
-      signal: AbortSignal.timeout(25000),
+      signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
     });
 
     if (!res.ok) {
@@ -74,23 +118,29 @@ export async function POST(req: NextRequest) {
       throw new Error(`LM Studio error ${res.status}: ${errText}`);
     }
 
-    const data = await res.json();
-    const rawContent: string = data.choices?.[0]?.message?.content || '';
+    const data = (await res.json()) as LLMChatResponse;
+    const rawContent: string = data.choices?.[0]?.message?.content ?? '';
 
-    const config = parseJsonFromLLM(rawContent);
-    return NextResponse.json(config);
-
+    const rawObj = parseJsonFromLLM(rawContent);
+    const normalized = parseGameConfig(rawObj, dream);
+    return NextResponse.json(normalized, { status: 200 });
   } catch (err) {
-    console.error('LM Studio error:', err);
-    // Возвращаем fallback-конфиг чтобы демо не падало
+    logApiError('analyze', err);
+    // Graceful degradation: never crash the demo. `buildFallback` is canonical
+    // and trusted, so no further normalization is required.
     return NextResponse.json(buildFallback(dream), { status: 200 });
   }
 }
 
-function parseJsonFromLLM(text: string): Record<string, unknown> {
-  // Убираем <think>...</think> блоки (Qwen3 thinking mode)
+/**
+ * Extract a JSON object from an LLM response string.
+ *
+ * Defense-in-depth: strips `<think>...</think>` blocks and markdown fences
+ * even though the SYSTEM_PROMPT forbids them, then slices from the first `{`
+ * to the last `}` and runs `JSON.parse`. May throw — callers must handle it.
+ */
+function parseJsonFromLLM(text: string): unknown {
   const noThink = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-  // Убираем markdown-обёртки
   const cleaned = noThink.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');

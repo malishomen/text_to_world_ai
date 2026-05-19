@@ -3,7 +3,7 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Stars, Sparkles, Float, Text } from '@react-three/drei';
 import { Physics, RigidBody, RapierRigidBody } from '@react-three/rapier';
-import { useRef, useEffect, useState, useMemo } from 'react';
+import { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import * as THREE from 'three';
 
 // Single source of truth for the GameConfig type lives in `@/lib/fallback-config`.
@@ -29,15 +29,18 @@ function FollowCamera({ target }: { target: React.RefObject<RapierRigidBody | nu
   const { camera } = useThree();
   const camPos = useRef(new THREE.Vector3(0, 12, -18));
   const lookTarget = useRef(new THREE.Vector3());
+  // Cached scratch vectors — avoids `new THREE.Vector3` per frame (GC pressure).
+  const desired = useRef(new THREE.Vector3());
+  const lookScratch = useRef(new THREE.Vector3());
 
   useFrame(() => {
     if (!target.current) return;
     const t = target.current.translation();
-    const p = new THREE.Vector3(t.x, t.y, t.z);
-    const desired = p.clone().add(new THREE.Vector3(0, 9, -16));
-    camPos.current.lerp(desired, 0.07);
+    desired.current.set(t.x, t.y + 9, t.z - 16);
+    camPos.current.lerp(desired.current, 0.07);
     camera.position.copy(camPos.current);
-    lookTarget.current.lerp(new THREE.Vector3(p.x, p.y + 1.5, p.z), 0.1);
+    lookScratch.current.set(t.x, t.y + 1.5, t.z);
+    lookTarget.current.lerp(lookScratch.current, 0.1);
     camera.lookAt(lookTarget.current);
   });
   return null;
@@ -61,6 +64,8 @@ function Player({ bodyRef, color, keys, goalPos, enemyPositions, endedRef, onDea
   const contacts = useRef(0);
   const meshRef = useRef<THREE.Mesh>(null);
   const lightRef = useRef<THREE.PointLight>(null);
+  // Cached scratch vector — eliminates `new THREE.Vector3` allocation per frame.
+  const playerVec = useRef(new THREE.Vector3());
 
   useFrame((_, delta) => {
     if (!bodyRef.current || endedRef.current) return;
@@ -103,9 +108,9 @@ function Player({ bodyRef, color, keys, goalPos, enemyPositions, endedRef, onDea
     }
 
     // Enemy collision (distance-based, avoids rapier event complexity)
-    const playerVec = new THREE.Vector3(pos.x, pos.y, pos.z);
+    playerVec.current.set(pos.x, pos.y, pos.z);
     for (const ep of enemyPositions) {
-      if (playerVec.distanceTo(ep) < 1.4) {
+      if (playerVec.current.distanceTo(ep) < 1.4) {
         endedRef.current = true;
         onDead();
         return;
@@ -113,7 +118,7 @@ function Player({ bodyRef, color, keys, goalPos, enemyPositions, endedRef, onDea
     }
 
     // Win
-    if (playerVec.distanceTo(goalPos) < 2.8 && !endedRef.current) {
+    if (playerVec.current.distanceTo(goalPos) < 2.8 && !endedRef.current) {
       endedRef.current = true;
       onWin();
     }
@@ -297,14 +302,51 @@ function hashString(s: string, salt = 0): number {
   return s.split('').reduce((acc, c) => acc + c.charCodeAt(0), salt);
 }
 
+// ─── Mood preset ─────────────────────────────────────────────────────────────
+interface MoodPreset {
+  fogDensity: number;
+  starsCount: number;
+  sparklesCount: number;
+  ambientIntensity: number;
+  directionalIntensity: number;
+}
+
+function moodPresetFor(mood: string | undefined): MoodPreset {
+  if (mood === 'nightmare') {
+    return {
+      fogDensity: 0.03,
+      starsCount: 1500,
+      sparklesCount: 40,
+      ambientIntensity: 0.25,
+      directionalIntensity: 1.2,
+    };
+  }
+  if (mood === 'cozy_dream') {
+    return {
+      fogDensity: 0.006,
+      starsCount: 800,
+      sparklesCount: 180,
+      ambientIntensity: 0.7,
+      directionalIntensity: 2.5,
+    };
+  }
+  return {
+    fogDensity: 0.015,
+    starsCount: 3000,
+    sparklesCount: 120,
+    ambientIntensity: 0.5,
+    directionalIntensity: 2,
+  };
+}
+
 // ─── Level generator ─────────────────────────────────────────────────────────
-function generateLevel(config: GameConfig, palette: string[]) {
+function generateLevel(config: GameConfig, palette: string[], seedStr: string) {
   const count = Math.max(5, Math.min(config.platforms || 6, 12));
   const platforms: { pos: [number, number, number]; size: [number, number, number]; color: string }[] = [
     { pos: [0, 0, 0], size: [7, 0.8, 7], color: palette[0] },
   ];
 
-  const rng = makeRng(hashString(config.mood || 'dream'));
+  const rng = makeRng(hashString(seedStr));
 
   let x = 0, z = 7, y = 0;
   for (let i = 0; i < count; i++) {
@@ -324,8 +366,9 @@ function generateLevel(config: GameConfig, palette: string[]) {
 }
 
 // ─── Main scene ──────────────────────────────────────────────────────────────
-function DreamScene({ config, restartToken, onWin, onDead }: {
+function DreamScene({ config, generationId, restartToken, onWin, onDead }: {
   config: GameConfig;
+  generationId?: string;
   restartToken: number;
   onWin: () => void;
   onDead: () => void;
@@ -334,12 +377,20 @@ function DreamScene({ config, restartToken, onWin, onDead }: {
   const keys = useKeys();
   const endedRef = useRef(false);
 
+  // Seed string: prefer caller-provided generationId so same-id-same-level;
+  // fall back to mood so legacy callers without an id still get a sensible
+  // (mood-grouped) layout.
+  const levelSeed = generationId ?? (config.mood || 'dream');
+
   const palette = useMemo(
     () => (config.color_palette?.length ? config.color_palette : ['#a855f7', '#7c3aed', '#4c1d95', '#1e1b4b']),
     [config.color_palette],
   );
 
-  const platforms = useMemo(() => generateLevel(config, palette), [config, palette]);
+  const platforms = useMemo(
+    () => generateLevel(config, palette, levelSeed),
+    [config, palette, levelSeed],
+  );
   const last = platforms[platforms.length - 1];
   const goalPos = useMemo(
     () => new THREE.Vector3(last.pos[0], last.pos[1] + 3.5, last.pos[2]),
@@ -348,16 +399,16 @@ function DreamScene({ config, restartToken, onWin, onDead }: {
 
   const enemies = useMemo(() => {
     const count = Math.min(config.enemy_count || 3, platforms.length - 1);
-    // Deterministic phase seed per enemy — derived from mood string so the
+    // Deterministic phase seed per enemy — derived from levelSeed so the
     // orbit pattern is reproducible for a given dream. Avoids Math.random()
     // inside `useRef` initializers (impure during render).
-    const rng = makeRng(hashString(config.mood || 'dream', 17));
+    const rng = makeRng(hashString(levelSeed, 17));
     return Array.from({ length: count }, (_, i) => {
       const p = platforms[Math.max(1, Math.round(1 + (i * (platforms.length - 2)) / Math.max(count - 1, 1)))];
       const pos: [number, number, number] = [p.pos[0], p.pos[1] + 1.5, p.pos[2]];
       return { id: i, pos, posRef: new THREE.Vector3(...pos), phaseSeed: rng() * Math.PI * 2 };
     });
-  }, [config.enemy_count, config.mood, platforms]);
+  }, [config.enemy_count, levelSeed, platforms]);
 
   // Stable array of enemy Vector3 refs for Player collision sampling.
   // Each Vector3 instance is owned by the corresponding Enemy and mutated in place;
@@ -376,7 +427,7 @@ function DreamScene({ config, restartToken, onWin, onDead }: {
   }, [restartToken]);
 
   const skyHex = config.background?.sky_color || '#0a0015';
-  const fogDensity = config.mood === 'nightmare' ? 0.03 : config.mood === 'cozy_dream' ? 0.006 : 0.015;
+  const mp = useMemo(() => moodPresetFor(config.mood), [config.mood]);
   const p0 = useMemo(() => new THREE.Color(palette[0]), [palette]);
   const p1 = useMemo(() => new THREE.Color(palette[1] || palette[0]), [palette]);
   const p2 = useMemo(() => new THREE.Color(palette[2] || palette[0]), [palette]);
@@ -384,19 +435,19 @@ function DreamScene({ config, restartToken, onWin, onDead }: {
   return (
     <>
       <color attach="background" args={[skyHex]} />
-      <fogExp2 attach="fog" args={[skyHex, fogDensity]} />
+      <fogExp2 attach="fog" args={[skyHex, mp.fogDensity]} />
 
       {/* Lighting */}
-      <ambientLight intensity={0.5} color={p1} />
-      <directionalLight position={[15, 30, 10]} intensity={2} color={p0} castShadow
+      <ambientLight intensity={mp.ambientIntensity} color={p1} />
+      <directionalLight position={[15, 30, 10]} intensity={mp.directionalIntensity} color={p0} castShadow
         shadow-mapSize-width={1024} shadow-mapSize-height={1024} />
       <pointLight position={[-20, 15, -10]} color={p2} intensity={3} distance={60} />
       <pointLight position={[20, 5, 30]} color={p0} intensity={2} distance={50} />
 
       {/* Environment */}
-      <Stars radius={120} depth={60} count={4000} factor={5} fade speed={0.4} />
+      <Stars radius={120} depth={60} count={mp.starsCount} factor={5} fade speed={0.4} />
       <Sparkles
-        count={120}
+        count={mp.sparklesCount}
         scale={[platforms.length * 5, 20, platforms.length * 7]}
         position={[0, 6, platforms.length * 3.5]}
         size={2}
@@ -460,9 +511,11 @@ function DreamScene({ config, restartToken, onWin, onDead }: {
 }
 
 // ─── Exported component ───────────────────────────────────────────────────────
-export default function DreamGame3D({ config }: { config: GameConfig }) {
+export default function DreamGame3D({ config, generationId }: { config: GameConfig; generationId?: string }) {
   const [state, setState] = useState<'playing' | 'won' | 'dead'>('playing');
   const [restartToken, setRestartToken] = useState(0);
+  const [showFocusHint, setShowFocusHint] = useState(true);
+  const wrapperRef = useRef<HTMLDivElement>(null);
 
   const restart = () => {
     setState('playing');
@@ -470,8 +523,33 @@ export default function DreamGame3D({ config }: { config: GameConfig }) {
     setRestartToken(t => t + 1);
   };
 
+  const focusWrapper = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.currentTarget.focus();
+  }, []);
+
+  // Hide the focus hint after the first control-key press.
+  useEffect(() => {
+    if (!showFocusHint) return;
+    const controlCodes = new Set([
+      'KeyW', 'KeyA', 'KeyS', 'KeyD',
+      'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+      'Space',
+    ]);
+    const onKey = (e: KeyboardEvent) => {
+      if (controlCodes.has(e.code)) setShowFocusHint(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showFocusHint]);
+
   return (
-    <div className="relative w-full h-full" style={{ outline: 'none' }} tabIndex={0}>
+    <div
+      ref={wrapperRef}
+      className="relative w-full h-full"
+      style={{ outline: 'none' }}
+      tabIndex={0}
+      onClick={focusWrapper}
+    >
       <Canvas
         shadows
         camera={{ fov: 65, near: 0.1, far: 600, position: [0, 12, -18] }}
@@ -479,11 +557,19 @@ export default function DreamGame3D({ config }: { config: GameConfig }) {
       >
         <DreamScene
           config={config}
+          generationId={generationId}
           restartToken={restartToken}
           onWin={() => setState('won')}
           onDead={() => setState('dead')}
         />
       </Canvas>
+
+      {/* Focus hint (fades out after first valid keypress) */}
+      {showFocusHint && state === 'playing' && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 text-white/60 text-xs bg-black/40 backdrop-blur px-3 py-1.5 rounded-full pointer-events-none">
+          Click here to give canvas focus, then use WASD / arrows / Space
+        </div>
+      )}
 
       {/* Controls hint */}
       {state === 'playing' && (

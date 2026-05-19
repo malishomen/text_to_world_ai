@@ -1,9 +1,14 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { buildFallback, type GameConfig } from '@/lib/fallback-config';
+import { parseGameConfig } from '@/lib/game-config-schema';
+import { newGenerationId, isValidGenerationId } from '@/lib/generation-id';
 
+// Visual progression skeleton — kept for animation continuity. The big
+// label/icon shown to the user is driven by the real `status` state machine
+// below, not this list. Steps still animate over time as decoration.
 const STEPS = [
   { label: 'Reading your dream...', icon: '🌙', duration: 2000 },
   { label: 'Analyzing mood & atmosphere...', icon: '🎭', duration: 3000 },
@@ -17,11 +22,60 @@ const STEPS = [
 
 const MAX_MS = Number(process.env.NEXT_PUBLIC_MAX_GENERATION_MS ?? 75000);
 
+// Real status state machine — what's actually happening server-side.
+type Status =
+  | { kind: 'starting' }
+  | { kind: 'analyzing' }
+  | { kind: 'saving_config' }
+  | { kind: 'generating_assets' } // 2D + 3D in parallel, background
+  | { kind: 'done' }
+  | { kind: 'fallback_used'; reason: string };
+
+interface StatusView {
+  label: string;
+  icon: string;
+}
+
+function viewForStatus(status: Status): StatusView {
+  switch (status.kind) {
+    case 'starting':
+      return { label: 'Reading your dream...', icon: '🌙' };
+    case 'analyzing':
+      return { label: 'Analyzing mood & atmosphere...', icon: '🎭' };
+    case 'saving_config':
+      return { label: 'Designing cinematic world...', icon: '🎬' };
+    case 'generating_assets':
+      return { label: 'Generating 3D character & props...', icon: '🧙' };
+    case 'done':
+      return { label: 'Launching Godot engine...', icon: '⚡' };
+    case 'fallback_used':
+      return { label: 'Weaving a dream from imagination...', icon: '✨' };
+  }
+}
+
+// Map status.kind to "current step index" in the decorative STEPS list.
+function stepIndexForStatus(status: Status): number {
+  switch (status.kind) {
+    case 'starting':
+      return 0;
+    case 'analyzing':
+      return 1;
+    case 'saving_config':
+      return 2;
+    case 'generating_assets':
+      return 4;
+    case 'done':
+    case 'fallback_used':
+      return STEPS.length;
+  }
+}
+
 export default function LoadingDream() {
-  const [currentStep, setCurrentStep] = useState(0);
+  const [animatedStep, setAnimatedStep] = useState(0);
   const [progress, setProgress] = useState(0);
   const [narrative, setNarrative] = useState('');
   const [elapsedSec, setElapsedSec] = useState(0);
+  const [status, setStatus] = useState<Status>({ kind: 'starting' });
   const router = useRouter();
 
   const started = useRef(false);
@@ -37,6 +91,13 @@ export default function LoadingDream() {
       return;
     }
 
+    // Sticky generationId for this session (StrictMode-safe; same id on remount).
+    let generationId = localStorage.getItem('generationId');
+    if (!generationId || !isValidGenerationId(generationId)) {
+      generationId = newGenerationId();
+      localStorage.setItem('generationId', generationId);
+    }
+
     const ac = new AbortController();
     const timers: ReturnType<typeof setTimeout>[] = [];
     let heartbeatId: ReturnType<typeof setInterval> | null = null;
@@ -44,6 +105,8 @@ export default function LoadingDream() {
     const goPlay = (_reason: 'ok' | 'timeout' | 'error') => {
       if (navigated.current) return;
       navigated.current = true;
+      // Never overwrite an existing good gameConfig — if analyze already
+      // populated it, the fallback would be a regression.
       if (!localStorage.getItem('gameConfig')) {
         localStorage.setItem('gameConfig', JSON.stringify(buildFallback(dream)));
       }
@@ -60,7 +123,7 @@ export default function LoadingDream() {
       setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
     }, 1000);
 
-    // Step animation — every setTimeout tracked in `timers`.
+    // Decorative step animation — every setTimeout tracked in `timers`.
     let stepIndex = 0;
     let elapsed = 0;
     const totalDuration = STEPS.reduce((sum, s) => sum + s.duration, 0);
@@ -71,7 +134,7 @@ export default function LoadingDream() {
       elapsed += STEPS[stepIndex].duration;
       setProgress(Math.round((elapsed / totalDuration) * 100));
       stepIndex++;
-      setCurrentStep(stepIndex);
+      setAnimatedStep(stepIndex);
       if (stepIndex < STEPS.length) {
         timers.push(setTimeout(tick, STEPS[stepIndex].duration));
       }
@@ -80,6 +143,11 @@ export default function LoadingDream() {
 
     // Dev fake-AI shortcut — skip LLM/SD/TRELLIS entirely.
     if (process.env.NEXT_PUBLIC_DEV_FAKE_AI === '1') {
+      // Defer setState off the effect synchronous path (eslint rule).
+      queueMicrotask(() => {
+        if (navigated.current) return;
+        setStatus({ kind: 'fallback_used', reason: 'dev_fake_ai' });
+      });
       timers.push(setTimeout(() => goPlay('ok'), 3000));
       return () => {
         ac.abort();
@@ -89,12 +157,16 @@ export default function LoadingDream() {
       };
     }
 
-    generateGame(dream, ac.signal, setNarrative)
-      .then(() => goPlay('ok'))
-      .catch((err) => {
-        if (err?.name !== 'AbortError') console.error(err);
-        goPlay('error');
-      });
+    // Real pipeline — analyze first, then fire-and-forget assets, then navigate.
+    runPipeline({
+      dream,
+      generationId,
+      signal: ac.signal,
+      setStatus,
+      setNarrative,
+      goPlay,
+      navigated,
+    });
 
     return () => {
       ac.abort();
@@ -104,7 +176,14 @@ export default function LoadingDream() {
     };
   }, [router]);
 
-  const activeStep = STEPS[currentStep] || STEPS[STEPS.length - 1];
+  // The big label/icon comes from real status when we have one; otherwise
+  // fall back to the animated decorative step (covers the 'starting' moment
+  // before the first network call kicks off).
+  const statusView = useMemo(() => viewForStatus(status), [status]);
+  const currentStepIdx = stepIndexForStatus(status);
+  const displayStep = Math.max(currentStepIdx, animatedStep);
+  const activeLabel = statusView.label;
+  const activeIcon = statusView.icon;
 
   return (
     <main className="min-h-screen bg-[#0a0015] flex flex-col items-center justify-center px-4 relative overflow-hidden">
@@ -115,10 +194,10 @@ export default function LoadingDream() {
       </div>
 
       <div className="relative z-10 w-full max-w-lg text-center">
-        {/* Big pulsing icon */}
-        <div className="text-7xl mb-8 animate-bounce">{activeStep.icon}</div>
+        {/* Big pulsing icon — driven by real status */}
+        <div className="text-7xl mb-8 animate-bounce">{activeIcon}</div>
 
-        <h2 className="text-2xl font-semibold text-purple-100 mb-2">{activeStep.label}</h2>
+        <h2 className="text-2xl font-semibold text-purple-100 mb-2">{activeLabel}</h2>
 
         {narrative && (
           <p className="text-purple-300/60 text-sm italic mb-6 px-4">&ldquo;{narrative}&rdquo;</p>
@@ -132,22 +211,22 @@ export default function LoadingDream() {
           />
         </div>
 
-        {/* Step list */}
+        {/* Step list — decorative, animated by both the timer and the real status */}
         <div className="text-left space-y-2">
           {STEPS.map((step, i) => (
             <div
               key={i}
               className={`flex items-center gap-3 px-4 py-2 rounded-xl transition-all duration-500 ${
-                i < currentStep
+                i < displayStep
                   ? 'text-purple-400/60'
-                  : i === currentStep
+                  : i === displayStep
                   ? 'text-purple-100 bg-purple-800/20'
                   : 'text-purple-600/30'
               }`}
             >
-              <span className={`text-lg ${i === currentStep ? 'animate-spin' : ''}`}
-                    style={i === currentStep ? { animationDuration: '3s' } : {}}>
-                {i < currentStep ? '✓' : step.icon}
+              <span className={`text-lg ${i === displayStep ? 'animate-spin' : ''}`}
+                    style={i === displayStep ? { animationDuration: '3s' } : {}}>
+                {i < displayStep ? '✓' : step.icon}
               </span>
               <span className="text-sm">{step.label}</span>
             </div>
@@ -164,45 +243,107 @@ export default function LoadingDream() {
   );
 }
 
-async function generateGame(
-  dream: string,
-  signal: AbortSignal,
-  setNarrative: (s: string) => void,
-): Promise<void> {
-  const analyzeRes = await fetch('/api/analyze', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dream }),
-    signal,
-  });
+interface PipelineDeps {
+  dream: string;
+  generationId: string;
+  signal: AbortSignal;
+  setStatus: (s: Status) => void;
+  setNarrative: (s: string) => void;
+  goPlay: (reason: 'ok' | 'timeout' | 'error') => void;
+  navigated: React.RefObject<boolean>;
+}
 
-  if (!analyzeRes.ok) throw new Error('Dream analysis failed');
-  const gameConfig = (await analyzeRes.json()) as GameConfig;
+/**
+ * Real pipeline:
+ *  1. analyze (await — gates config)
+ *  2. parse defensively + save gameConfig
+ *  3. fire-and-forget /api/generate-3d + /api/generate-assets in parallel
+ *  4. navigate immediately to /play (don't block on assets)
+ *
+ * Assets that arrive after navigation write to localStorage; /play picks them
+ * up on render or via a storage event. AbortController cancels them if the
+ * user navigates away before they resolve.
+ */
+function runPipeline(deps: PipelineDeps): void {
+  const { dream, generationId, signal, setStatus, setNarrative, goPlay, navigated } = deps;
 
-  // Persist config BEFORE firing parallel asset jobs — so even if the
-  // hard timer trips while assets hang, /play has the good config.
-  localStorage.setItem('gameConfig', JSON.stringify(gameConfig));
-  if (gameConfig?.narrative) setNarrative(gameConfig.narrative);
+  setStatus({ kind: 'analyzing' });
 
-  // Generate 3D assets (TRELLIS) + 2D fallback (SD) in parallel.
-  const [assets3d, assets2d] = await Promise.allSettled([
-    fetch('/api/generate-3d', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config: gameConfig }),
-      signal,
-    }).then((r) => r.json()),
-    fetch('/api/generate-assets', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config: gameConfig }),
-      signal,
-    }).then((r) => r.json()),
-  ]);
+  (async () => {
+    let rawJson: unknown = null;
+    try {
+      const analyzeRes = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dream }),
+        signal,
+      });
 
-  const merged = {
-    ...(assets2d.status === 'fulfilled' ? assets2d.value : {}),
-    ...(assets3d.status === 'fulfilled' ? assets3d.value : {}),
-  };
-  localStorage.setItem('gameAssets', JSON.stringify(merged));
+      if (!analyzeRes.ok) {
+        throw new Error(`Dream analysis failed: ${analyzeRes.status}`);
+      }
+      rawJson = (await analyzeRes.json()) as unknown;
+    } catch (err) {
+      if ((err as { name?: string } | null)?.name === 'AbortError') return;
+      console.error(err);
+      if (navigated.current) return;
+      setStatus({ kind: 'fallback_used', reason: 'analyze_failed' });
+      goPlay('error');
+      return;
+    }
+
+    if (navigated.current) return;
+
+    // Defensive parse — guarantees a valid GameConfig even if analyze
+    // returned garbage. analyze already validates, but this is cheap.
+    const config: GameConfig = parseGameConfig(rawJson, dream);
+
+    setStatus({ kind: 'saving_config' });
+    try {
+      localStorage.setItem('gameConfig', JSON.stringify(config));
+    } catch {
+      // localStorage full / disabled — fallback path still works via goPlay.
+    }
+    if (config.narrative) setNarrative(config.narrative);
+
+    // Fire-and-forget asset generation. AbortController in cleanup will
+    // cancel these if the user navigates away.
+    setStatus({ kind: 'generating_assets' });
+    void Promise.allSettled([
+      fetch('/api/generate-3d', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config, generationId }),
+        signal,
+      }).then((r) => r.json() as Promise<unknown>),
+      fetch('/api/generate-assets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config, generationId }),
+        signal,
+      }).then((r) => r.json() as Promise<unknown>),
+    ]).then((results) => {
+      const [three, two] = results;
+      const threeValue =
+        three.status === 'fulfilled' && three.value && typeof three.value === 'object'
+          ? (three.value as Record<string, unknown>)
+          : {};
+      const twoValue =
+        two.status === 'fulfilled' && two.value && typeof two.value === 'object'
+          ? (two.value as Record<string, unknown>)
+          : {};
+      const merged = { ...twoValue, ...threeValue };
+      try {
+        localStorage.setItem('gameAssets', JSON.stringify(merged));
+      } catch {
+        // ignore
+      }
+    });
+
+    // Navigate immediately — don't wait for assets.
+    if (!navigated.current) {
+      setStatus({ kind: 'done' });
+      goPlay('ok');
+    }
+  })();
 }
