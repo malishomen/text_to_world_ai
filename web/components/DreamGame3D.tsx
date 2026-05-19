@@ -2,7 +2,7 @@
 
 import { Canvas, useFrame, useThree, useLoader } from '@react-three/fiber';
 import { Stars, Sparkles, Float, Text, useGLTF, useTexture } from '@react-three/drei';
-import { Physics, RigidBody, RapierRigidBody } from '@react-three/rapier';
+import { Physics, RigidBody, RapierRigidBody, BallCollider } from '@react-three/rapier';
 import { useRef, useEffect, useState, useMemo, useCallback, Suspense, Component, ReactNode } from 'react';
 import * as THREE from 'three';
 import { OBJLoader } from 'three-stdlib';
@@ -247,7 +247,12 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, go
   return (
     <RigidBody
       ref={bodyRef}
-      colliders="ball"
+      // Explicit BallCollider below — never let Rapier auto-derive from the
+      // visual mesh. GLB/OBJ characters have unpredictable bounds (LLaMA-Mesh
+      // in particular emits stretched 0..64 coords) and auto-derivation would
+      // either oversize the collider (player clips through platforms or gets
+      // stuck on edges) or undersize it (visual mesh pokes through geometry).
+      colliders={false}
       restitution={0.05}
       friction={2}
       linearDamping={0.8}
@@ -261,6 +266,7 @@ function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, go
         if (contacts.current === 0) grounded.current = false;
       }}
     >
+      <BallCollider args={[0.55]} />
       {characterUrl ? (
         <AssetBoundary fallback={procedural}>
           <Suspense fallback={procedural}>
