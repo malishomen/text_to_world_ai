@@ -2,7 +2,7 @@
 
 import { Canvas, useFrame, useThree, useLoader } from '@react-three/fiber';
 import { Stars, Sparkles, Float, Text, useGLTF, useTexture } from '@react-three/drei';
-import { Physics, RigidBody, RapierRigidBody, BallCollider } from '@react-three/rapier';
+import { Physics, RigidBody, RapierRigidBody, BallCollider, CuboidCollider } from '@react-three/rapier';
 import { useRef, useEffect, useState, useMemo, useCallback, Suspense, Component, ReactNode } from 'react';
 import * as THREE from 'three';
 import { OBJLoader } from 'three-stdlib';
@@ -356,22 +356,37 @@ function Platform({ position, size, color, index, textureUrl, decoration, isSpaw
   });
 
   const plain = <PlainPlatformMaterial color={col} matRef={matRef} />;
+  const halfSize: [number, number, number] = [size[0] / 2, size[1] / 2, size[2] / 2];
 
   return (
-    <RigidBody type="fixed" position={position} colliders="cuboid">
-      <mesh ref={meshRef} receiveShadow castShadow>
-        <boxGeometry args={size} />
-        {textureUrl ? (
-          <AssetBoundary fallback={plain}>
-            <Suspense fallback={plain}>
-              <TexturedPlatformMaterial url={textureUrl} fallbackColor={col} matRef={matRef} />
-            </Suspense>
-          </AssetBoundary>
-        ) : plain}
-      </mesh>
-      {/* Skip decoration on spawn platform — keep player area clean. */}
-      {!isSpawn && <PlatformDecoration kind={decoration} color={col} seed={index * 1.3} />}
-    </RigidBody>
+    <>
+      <RigidBody type="fixed" position={position} colliders={false}>
+        {/* Explicit single cuboid collider matching the box geometry. With
+            colliders="cuboid" Rapier auto-derived ONE collider per child mesh
+            — meaning decorations (crystal/spire/orb/torus) added extra
+            invisible blockers on top of every platform, causing the player
+            to get stuck approaching the last-platform portal. */}
+        <CuboidCollider args={halfSize} />
+        <mesh ref={meshRef} receiveShadow castShadow>
+          <boxGeometry args={size} />
+          {textureUrl ? (
+            <AssetBoundary fallback={plain}>
+              <Suspense fallback={plain}>
+                <TexturedPlatformMaterial url={textureUrl} fallbackColor={col} matRef={matRef} />
+              </Suspense>
+            </AssetBoundary>
+          ) : plain}
+        </mesh>
+      </RigidBody>
+      {/* Decoration lives OUTSIDE the RigidBody — purely visual, never a
+          physics blocker. Position mirrors the platform so the decoration's
+          own local offset (y=0.5..1.2 above origin) lands above the platform. */}
+      {!isSpawn && (
+        <group position={position}>
+          <PlatformDecoration kind={decoration} color={col} seed={index * 1.3} />
+        </group>
+      )}
+    </>
   );
 }
 
