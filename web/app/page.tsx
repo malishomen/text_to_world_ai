@@ -4,6 +4,11 @@ import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Mic, MicOff, Sparkles, Moon, Stars } from 'lucide-react';
 import { DEMO_PRESETS, type DemoPreset } from '@/lib/demo-presets';
+import {
+  type GameAssets,
+  DREAM_ASSETS_UPDATED_EVENT,
+  mergeAssetResponses,
+} from '@/lib/game-assets';
 
 export default function Home() {
   const [dreamText, setDreamText] = useState('');
@@ -79,6 +84,42 @@ export default function Home() {
     localStorage.setItem('dreamText', preset.dream);
     localStorage.setItem('gameConfig', JSON.stringify(preset.config));
     localStorage.setItem('generationId', preset.generationId);
+
+    // Fire-and-forget FLUX asset generation. /api/generate-assets is
+    // idempotent (cache short-circuit at first existing PNG triple) so
+    // every preset click after the first is a disk read. /play listens
+    // for DREAM_ASSETS_UPDATED_EVENT + storage event, so when assets
+    // land — even after navigation — the procedural cubes get replaced
+    // with FLUX-painted backdrop / character billboard / platform texture.
+    void Promise.allSettled([
+      fetch('/api/generate-assets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          config: preset.config,
+          generationId: preset.generationId,
+        }),
+      }).then((r) => r.json() as Promise<unknown>),
+    ])
+      .then(([two]) => {
+        const twoValue: unknown = two.status === 'fulfilled' ? two.value : null;
+        const merged: GameAssets = mergeAssetResponses(
+          twoValue,
+          null,
+          preset.generationId,
+          null,
+        );
+        try {
+          localStorage.setItem('gameAssets', JSON.stringify(merged));
+          window.dispatchEvent(new CustomEvent(DREAM_ASSETS_UPDATED_EVENT));
+        } catch {
+          // ignore
+        }
+      })
+      .catch(() => {
+        // Defensive — never let asset failures crash navigation.
+      });
+
     router.push('/play'); // SKIP /loading-dream entirely
   };
 
