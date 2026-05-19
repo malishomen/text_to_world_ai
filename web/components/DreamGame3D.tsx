@@ -1,10 +1,11 @@
 'use client';
 
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { Canvas, useFrame, useThree, useLoader } from '@react-three/fiber';
 import { Stars, Sparkles, Float, Text, useGLTF, useTexture } from '@react-three/drei';
 import { Physics, RigidBody, RapierRigidBody } from '@react-three/rapier';
 import { useRef, useEffect, useState, useMemo, useCallback, Suspense, Component, ReactNode } from 'react';
 import * as THREE from 'three';
+import { OBJLoader } from 'three-stdlib';
 
 // Single source of truth for the GameConfig type lives in `@/lib/fallback-config`.
 // Re-exported here for backwards-compatibility of existing imports.
@@ -108,12 +109,64 @@ function GltfCharacter({ url, meshRef }: {
   return <primitive ref={meshRef} object={cloned} scale={0.55} />;
 }
 
+// LLaMA-Mesh output: standard OBJ with integer coords ~0..64. We center the
+// bounding box at origin and scale to a ~1.2-unit diameter so it matches the
+// procedural ball footprint. Material is overridden to inherit the player
+// color (LLaMA-Mesh does not emit materials).
+function ObjCharacter({ url, color, meshRef }: {
+  url: string;
+  color: THREE.Color;
+  meshRef: React.RefObject<THREE.Group | null>;
+}) {
+  const obj = useLoader(OBJLoader, url);
+  const prepared = useMemo(() => {
+    const cloned = obj.clone(true);
+    // Compute bbox to center + uniform-scale.
+    const bbox = new THREE.Box3().setFromObject(cloned);
+    const size = new THREE.Vector3();
+    bbox.getSize(size);
+    const center = new THREE.Vector3();
+    bbox.getCenter(center);
+    const maxDim = Math.max(size.x, size.y, size.z, 1e-3);
+    const targetDiameter = 1.2;
+    const s = targetDiameter / maxDim;
+    cloned.position.set(-center.x * s, -center.y * s, -center.z * s);
+    cloned.scale.setScalar(s);
+    // Override every material so the mesh inherits the dream's character color
+    // (OBJLoader produces default white MeshPhongMaterial without textures).
+    const mat = new THREE.MeshStandardMaterial({
+      color,
+      emissive: color,
+      emissiveIntensity: 0.6,
+      roughness: 0.25,
+      metalness: 0.4,
+      // OBJ may be one-sided; render both sides so thin meshes still look solid.
+      side: THREE.DoubleSide,
+      // Recompute normals would be ideal; flatShading hides interpolation gaps.
+      flatShading: true,
+    });
+    cloned.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+        child.material = mat;
+        if (child.geometry && !child.geometry.attributes.normal) {
+          child.geometry.computeVertexNormals();
+        }
+      }
+    });
+    return cloned;
+  }, [obj, color]);
+  return <primitive ref={meshRef} object={prepared} />;
+}
+
 // ─── Player ──────────────────────────────────────────────────────────────────
 interface PlayerProps {
   bodyRef: React.RefObject<RapierRigidBody | null>;
   color: string;
   shape: PlayerShape;
   characterUrl?: string | null;
+  characterObjUrl?: string | null;
   keys: React.RefObject<Record<string, boolean>>;
   goalPos: THREE.Vector3;
   enemyPositions: THREE.Vector3[];
@@ -122,7 +175,7 @@ interface PlayerProps {
   onWin: () => void;
 }
 
-function Player({ bodyRef, color, shape, characterUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin }: PlayerProps) {
+function Player({ bodyRef, color, shape, characterUrl, characterObjUrl, keys, goalPos, enemyPositions, endedRef, onDead, onWin }: PlayerProps) {
   const grounded = useRef(false);
   const canJump = useRef(true);
   const contacts = useRef(0);
@@ -212,6 +265,13 @@ function Player({ bodyRef, color, shape, characterUrl, keys, goalPos, enemyPosit
         <AssetBoundary fallback={procedural}>
           <Suspense fallback={procedural}>
             <GltfCharacter url={characterUrl} meshRef={gltfRef} />
+            <pointLight ref={lightRef} color={col} intensity={2.5} distance={6} />
+          </Suspense>
+        </AssetBoundary>
+      ) : characterObjUrl ? (
+        <AssetBoundary fallback={procedural}>
+          <Suspense fallback={procedural}>
+            <ObjCharacter url={characterObjUrl} color={col} meshRef={gltfRef} />
             <pointLight ref={lightRef} color={col} intensity={2.5} distance={6} />
           </Suspense>
         </AssetBoundary>
@@ -885,6 +945,7 @@ function DreamScene({ config, generationId, assets, restartToken, onWin, onDead 
           color={config.main_character?.color || palette[0]}
           shape={mp.playerShape}
           characterUrl={assets?.character_3d ?? null}
+          characterObjUrl={assets?.character_obj ?? null}
           keys={keys}
           goalPos={goalPos}
           enemyPositions={enemyPositions}

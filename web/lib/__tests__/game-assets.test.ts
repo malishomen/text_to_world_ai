@@ -18,6 +18,7 @@ describe('isGameAssets', () => {
       character_3d: '/generated3d/abcd/char.glb',
       prop_3d: '/generated3d/abcd/prop.glb',
       portal_3d: '/generated3d/abcd/portal.glb',
+      character_obj: '/generated3d/abcd/character.obj',
       hasAny: true,
     };
     expect(isGameAssets(v)).toBe(true);
@@ -35,6 +36,7 @@ describe('isGameAssets', () => {
       character_3d: '/generated3d/abcd/c.glb',
       prop_3d: null,
       portal_3d: null,
+      character_obj: null,
       hasAny: true,
     };
     expect(isGameAssets(v)).toBe(true);

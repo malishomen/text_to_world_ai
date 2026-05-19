@@ -481,6 +481,59 @@ sit on `test` only — no main merge yet.
 
 ---
 
+### 2026-05-19: LLaMA-Mesh wired in alongside Qwen3 — local fully-AI player character
+**Request:** User loaded `bartowski/LLaMA-Mesh-GGUF` Q4_K_M (4.92 GB) in LM Studio 0.4.2
+**alongside** the Qwen3 8B Gemini 3 Pro Preview (multi-model — works in 0.4+). Both
+READY on the same `:1234`. Goal: wire LLaMA-Mesh into the asset pipeline so the player
+character mesh is locally generated from the LLM's `main_character.description`.
+
+**Findings:**
+- LM Studio's `/v1/models` exposes both as separate ids (`qwen3-8b-gemini-3-pro-preview-distill`
+  and `llama-mesh`). Routing by `model` field in the chat-completions body is enough — no
+  separate base URLs, no port changes.
+- LLaMA-Mesh emits literal OBJ text wrapped in ```obj fences and prefaced with prose
+  ("Here is the generated mesh."). Quantized vertex coords in 0..64 range. Smoke test
+  ~55 s for ~50 verts + 100 faces on Q4_K_M.
+- `three-stdlib` already in deps tree, exports `OBJLoader` for `useLoader(OBJLoader, url)`.
+
+**Changes:**
+- `web/app/api/generate-mesh/route.ts` — new endpoint. Strips fences + thinking + non-OBJ
+  prose, validates ≥1 `v ` and ≥1 `f ` line, writes `character.obj` into
+  `public/generated3d/<id>/`. Env: `MESH_MODEL` (default `llama-mesh`), `MESH_TIMEOUT_MS`
+  (default 120000), shares `QWEN_BASE_URL`.
+- `web/lib/game-assets.ts` — `GameAssets` gains `character_obj: string|null`. `NO_ASSETS`,
+  `isGameAssets` (back-compat: accepts `character_obj===undefined` in old persisted blobs),
+  and `mergeAssetResponses` updated. Merge signature now takes a 4th `mesh?: unknown` arg.
+- `web/app/loading-dream/page.tsx` — fire-and-forget triple-call: existing generate-3d +
+  generate-assets + new generate-mesh, all under one `Promise.allSettled` then merged.
+- `web/components/DreamGame3D.tsx` — new `ObjCharacter` component: loads via OBJLoader,
+  computes bounding box, centers + uniform-scales to 1.2-unit diameter, overrides every
+  material to a `MeshStandardMaterial` keyed to the player color (LLaMA-Mesh emits no
+  materials), `flatShading` + `DoubleSide` to hide topology artifacts, recomputes vertex
+  normals when missing. `Player` accepts `characterObjUrl` and uses precedence
+  `characterUrl (GLB) → characterObjUrl (OBJ) → procedural mood-shape`.
+- `web/lib/__tests__/game-assets.test.ts` — fixtures updated for required `character_obj`.
+
+**Verification:**
+- `npm run test` — 213/213 green.
+- `npx tsc --noEmit` — clean.
+
+**Current state:**
+- Asset pipeline is now 3-way: TRELLIS (HF Space, GLB) ∥ SD (A1111, PNG) ∥ LLaMA-Mesh
+  (local, OBJ). Each fails independently to nulls; Player picks the first non-null in
+  order GLB → OBJ → procedural.
+- This is the first time the demo is fully AI-driven and **fully local** — no API keys,
+  no network for the player character path.
+
+**Remaining:**
+- Live test: real dream → confirm OBJ arrives at `/play` within client navigate timer
+  (90 s — LLaMA-Mesh first call ~55 s + Qwen3 ~19 s = 74 s; with two cold loads they may
+  serialize since LM Studio's multi-model slot scheduling is implementation-defined).
+- Consider running mesh + analyze in parallel (LM Studio supports parallel inference per
+  loaded model — both READY entries in the UI show `Parallel 1` / `Parallel 4`).
+
+---
+
 ## 5. Current operational state
 
 **Live environments (as of 2026-05-19, post-P0–P4):**
