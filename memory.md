@@ -109,6 +109,61 @@ Single `buildFallback(dream)` in `web/lib/fallback-config.ts` eliminates drift.
 
 ## 4. Session log (append-only, newest at bottom)
 
+### 2026-05-19: 12-phase quality plan shipped (Phases 1–12, 4 commits on `test`)
+**Request:** Execute the 12-phase quality plan via subagent decomposition,
+ignore concept docs, target macOS dev environment, mark Python/Godot as
+legacy (Option A), full audit at the end with all best practices.
+
+**Decomposition:** Wave 0 (parent) + 4 waves × multiple parallel subagents.
+
+**Changes (4 atomic commits on `test`, all green):**
+- `ac2a753` fix(phase1): pre-existing lint errors resolved — Math.random in
+  Enemy useRef refactored to deterministic phaseSeed prop (parent passes
+  via seeded LCG `makeRng` + `hashString`); setState-in-effect cases
+  documented with explicit inline disables; eslint config adds
+  `argsIgnorePattern: '^_'`. tsc + lint + build all 0.
+- `02fa4bf` feat(foundation): four new lib helpers — `game-config-schema.ts`
+  (zod 4 strict runtime validation + parseGameConfig normalizer),
+  `generation-id.ts` (sticky session id, validator + new/normalize),
+  `generated-paths.ts` (path-traversal-safe URL/FS builders),
+  `api-errors.ts` (badRequest / unprocessable / fallbackOk / logApiError
+  + redactSecrets for hf_*/sk-*/Bearer */token/key fields). Vitest +
+  116 unit tests. `docs/PRODUCTION_PLAN.md` (11 sections, 768 lines).
+  npm scripts: test, typecheck, check.
+- `0735a6e` feat(integration): all three API routes hardened (body
+  validation, 5000-char dream cap, structured logs, generationId,
+  WRITE_GODOT_ASSETS opt-in gate, wrote_godot in response, no leaked
+  stacks); /loading-dream switched to fire-and-forget assets (navigate
+  after analyze; assets continue in background) with real status machine;
+  /play gains corruption-recovery + responsive mobile layout + Export
+  modal (no alert); DreamGame3D seeds level from generationId, mood-driven
+  visual variety, canvas focus hint, per-frame Vector3 allocations removed
+  in Player + FollowCamera.
+- `790ff4f` docs: README rewritten (4 honest demo paths, accurate stack),
+  TROUBLESHOOTING.md (build/AI/UI failure modes), LEGACY.md (Python +
+  Godot status — Option A), PROJECT_MAP.yaml synced (Convention 2).
+
+**Verification:**
+- `npm run lint` → 0 errors, 0 warnings.
+- `npx tsc --noEmit` → 0 errors.
+- `npm run build` → all 5 routes generate successfully.
+- `npm run test` → 116 / 116 tests pass.
+- `npm run check` → all three pass in sequence.
+- PROJECT_MAP.yaml → YAML valid.
+
+**Current state:**
+- `test` at 790ff4f (5 commits ahead of main).
+- `main` unchanged at a66d7d9 (awaiting explicit `merge main now`).
+- macOS demo path: `cd web && npm ci && echo "NEXT_PUBLIC_DEV_FAKE_AI=1" > .env.local && npm run dev` → /play in 3 s with fallback.
+- Full demo path (LM Studio + SD + TRELLIS): graceful degradation at every layer.
+
+**Remaining / artifacts:**
+- Optional Phase 11 Playwright smoke (deferred per spec).
+- Phase 10 Option B (rehabilitate Python/Godot) — deferred per user.
+- User signal `merge main now` to land on production-equivalent branch.
+
+---
+
 ### 2026-05-19: merge test → main (Phase A–D + trinity landed)
 **Request:** User signal `merge main now` — explicit authorization to land
 all `test` work onto `main`.
@@ -229,7 +284,7 @@ project-memory-trinity skill.
 |---|---|---|
 | GitHub repo | ✅ live | https://github.com/malishomen/text_to_world_ai |
 | `main` branch | ✅ at a66d7d9 (Phase A–D + trinity merged) | origin/main |
-| `test` branch | ✅ at a66d7d9 (aligned with main, HEAD here) | origin/test |
+| `test` branch | ✅ at 790ff4f (+5 commits ahead: Phases 1–12 shipped) | origin/test |
 | Next.js dev server | ⏸ not started in this session | `cd web && npm run dev` |
 | LM Studio (Qwen3-coder) | ❓ unknown — depends on user | localhost:1234 |
 | Stable Diffusion A1111 | ❓ unknown | 127.0.0.1:7860 |
