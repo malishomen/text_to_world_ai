@@ -167,7 +167,14 @@ const DUCK_UP_SEC = 0.4;
 const DEFAULT_CROSSFADE_SEC = 1.5;
 /** Intro fade-in time (seconds). */
 const INTRO_FADE_SEC = 1.0;
-/** localStorage key for persisted mute state. */
+/**
+ * sessionStorage key for persisted mute state.
+ *
+ * Switched from localStorage so each fresh visit (new tab / refresh after
+ * tab close) defaults to UNMUTED. Hackathon demo: the user expects to hear
+ * the narrator + ambient on first arrival; a prior mute click should not
+ * silently mute future sessions.
+ */
 const MUTE_STORAGE_KEY = 'audioMuted';
 
 /** One drone chain: oscillators + filter + convolver + per-chain gain. */
@@ -236,11 +243,11 @@ export class AudioEngine {
     let persistedMute: boolean | null = null;
     if (typeof window !== 'undefined') {
       try {
-        const raw = window.localStorage.getItem(MUTE_STORAGE_KEY);
+        const raw = window.sessionStorage.getItem(MUTE_STORAGE_KEY);
         if (raw === '1') persistedMute = true;
         else if (raw === '0') persistedMute = false;
       } catch {
-        // localStorage unavailable (privacy mode) — ignore.
+        // sessionStorage unavailable (privacy mode) — ignore.
       }
     }
     this.muted = persistedMute ?? init.muted ?? false;
@@ -539,9 +546,9 @@ export class AudioEngine {
     this.muted = muted;
     if (typeof window !== 'undefined') {
       try {
-        window.localStorage.setItem(MUTE_STORAGE_KEY, muted ? '1' : '0');
+        window.sessionStorage.setItem(MUTE_STORAGE_KEY, muted ? '1' : '0');
       } catch {
-        // localStorage unavailable — ignore.
+        // sessionStorage unavailable — ignore.
       }
     }
     if (!this.ctx || !this.masterGain) return;

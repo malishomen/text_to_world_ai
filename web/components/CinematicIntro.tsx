@@ -123,7 +123,7 @@ export default function CinematicIntro(
     try {
       const initialMuted =
         typeof window !== 'undefined' &&
-        window.localStorage?.getItem('audioMuted') === '1';
+        window.sessionStorage?.getItem('audioMuted') === '1';
       engine = new AudioEngine({ mood: coercedMood, muted: initialMuted });
     } catch {
       // Engine construction failed — degrade silently. Schedule completion

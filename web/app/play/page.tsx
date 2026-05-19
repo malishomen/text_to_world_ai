@@ -128,10 +128,12 @@ export default function PlayPage() {
     };
   }, []);
 
-  // Sync muted UI state with persisted localStorage (set by CinematicIntro
-  // before it constructs the engine). Initialise once on mount.
+  // Sync muted UI state with sessionStorage (per-tab — no carry-over across
+  // browser sessions; hackathon demo always starts unmuted). Also clear any
+  // stale localStorage entry left by older builds.
   useEffect(() => {
-    setMuted(localStorage.getItem('audioMuted') === '1');
+    try { localStorage.removeItem('audioMuted'); } catch {}
+    setMuted(sessionStorage.getItem('audioMuted') === '1');
   }, []);
 
   // First-visit audio toast: show after intro completes, once per session.
